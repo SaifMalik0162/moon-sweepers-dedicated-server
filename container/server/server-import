@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Import only the owned game tree and enforce the supported native game ABI."""
+from pathlib import Path
+import hashlib
+import json
+import os
+import shutil
+import struct
+import tempfile
+
+SUPPORTED_SHA256 = "14f711a6a3b1b7cd803a03f85cc6c6201c5b546ab9b90329533f5cb8ae2e7f13"
+FILES = ("MoonSweepers.exe", "GameAssembly.dll", "UnityPlayer.dll", "baselib.dll", "dstorage.dll", "dstoragecore.dll", "UnityCrashHandler64.exe")
+DIRECTORIES = ("MoonSweepers_Data", "D3D12")
+
+
+def validate_game(root):
+    for name in FILES:
+        file = root / name
+        if not file.is_file() or file.is_symlink():
+            raise SystemExit(f"Missing regular game file: {root / name}")
+    for name in DIRECTORIES:
+        if not (root / name).is_dir() or (root / name).is_symlink():
+            raise SystemExit(f"Missing game directory: {root / name}")
+    for name in ("MoonSweepers.exe", "GameAssembly.dll", "UnityPlayer.dll"):
+        with (root / name).open("rb") as stream:
+            dos = stream.read(64)
+            if len(dos) != 64 or dos[:2] != b"MZ":
+                raise SystemExit(f"Expected Windows executable: {name}")
+            stream.seek(struct.unpack_from("<I", dos, 60)[0])
+            pe = stream.read(6)
+        if len(pe) != 6 or pe[:4] != b"PE\0\0" or struct.unpack_from("<H", pe, 4)[0] != 0x8664:
+            raise SystemExit(f"Expected Windows x64 game binary: {name}")
+    metadata = root / "MoonSweepers_Data/il2cpp_data/Metadata/global-metadata.dat"
+    with metadata.open("rb") as stream:
+        header = stream.read(8)
+    digest = hashlib.sha256((root / "GameAssembly.dll").read_bytes()).hexdigest()
+    if len(header) != 8 or struct.unpack("<II", header) != (0xFAB11BAF, 108) or digest != SUPPORTED_SHA256:
+        raise SystemExit(
+            "Unsupported Moon Sweepers build. This server module supports 1.0.5 / Steam build 26317497 "
+            "with metadata 108 and GameAssembly SHA-256 " + SUPPORTED_SHA256 + ". "
+            "Your GameAssembly SHA-256 is " + digest + ". "
+            "Use a server-module release that supports your installed game version. Existing saves were not changed."
+        )
+    return digest
+
+
+def main():
+    source = Path("/import/game")
+    target = Path("/data/game")
+    if (target / "MoonSweepers.exe").is_file():
+        validate_game(target)
+        print("Existing owned game installation matches supported 1.0.5 / build 26317497.")
+        return
+    digest = validate_game(source)
+    files = [source / name for name in FILES]
+    for name in DIRECTORIES:
+        for directory, children, filenames in os.walk(source / name, followlinks=False):
+            for child in children + filenames:
+                if (Path(directory) / child).is_symlink():
+                    raise SystemExit("Symbolic links are not supported in game import.")
+            files.extend(Path(directory) / name for name in filenames)
+    total = sum(file.stat().st_size for file in files)
+    if shutil.disk_usage("/data").free < total + 500 * 1024 * 1024:
+        raise SystemExit("Not enough free space to import game files and initialize Wine.")
+    if target.exists():
+        raise SystemExit("An incomplete /data/game already exists; inspect it before retrying.")
+    stage = Path(tempfile.mkdtemp(prefix="game-import-", dir="/data"))
+    try:
+        for file in files:
+            before = (file.stat().st_size, file.stat().st_mtime_ns)
+            output = stage / file.relative_to(source)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(file, output)
+            if before != (file.stat().st_size, file.stat().st_mtime_ns):
+                raise SystemExit("Game source changed during import; finish Steam updates and retry.")
+        validate_game(stage)
+        os.rename(stage, target)
+        stage = None
+        result = {"version": "1.0.5", "steam_buildid": "26317497", "files": len(files), "bytes": total,
+                  "metadata_version": 108, "GameAssembly_sha256": digest}
+        Path("/data/import-manifest.json").write_text(json.dumps(result, indent=2) + "\n")
+        print(f"Imported supported owned game: {len(files)} files, {total:,} bytes.")
+    finally:
+        if stage is not None:
+            shutil.rmtree(stage)
+
+
+if __name__ == "__main__":
+    main()

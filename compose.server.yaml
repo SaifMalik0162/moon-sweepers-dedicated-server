@@ -1,0 +1,35 @@
+name: moon-sweepers-server
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+      target: server
+    image: moon-sweepers-server:local
+    platform: linux/amd64
+    restart: unless-stopped
+    # Native saving can wait 90s; allow time for the 110s runner deadline and backup.
+    stop_grace_period: 180s
+    environment:
+      TZ: "${TZ:-America/Vancouver}"
+      MOON_SLOT: "${MOON_SLOT:-1}"
+      MOON_GAME_PORT: "${MOON_GAME_PORT:-27025}"
+      MOON_QUERY_PORT: "${MOON_QUERY_PORT:-27026}"
+      MOON_SERVER_PASSWORD: "${MOON_SERVER_PASSWORD:?Set a server password in .server.env}"
+      MOON_ALLOWED_STEAM_IDS: "${MOON_ALLOWED_STEAM_IDS:-}"
+      MOON_BACKUP_KEEP: "${MOON_BACKUP_KEEP:-10}"
+    volumes:
+      - server-data:/data
+      - type: bind
+        source: ${MOON_GAME_SOURCE:?Set MOON_GAME_SOURCE to your owned Moon Sweepers installation}
+        target: /import/game
+        read_only: true
+        bind:
+          create_host_path: false
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  server-data:

@@ -1,0 +1,12 @@
+{
+  "appid": 1007,
+  "depot": 1004,
+  "manifest": "7604377918839582995",
+  "observed_buildid": "25329704",
+  "files": {
+    "steamclient64.dll": "caba4826aa3501039d095aee1843a6bfb270fb43a3ab4455b2d6733223579fee",
+    "tier0_s64.dll": "30f7bb8d9b86006852493c26124ba253bd9e7ffd40a8b3c7254f86a9032c3be3",
+    "vstdlib_s64.dll": "99efb4c2ad47f90c803b5ee0bd6424916b28facb9fa2568845b1b1f58a36062a",
+    "steamwebrtc64.dll": "206a621d4716de11dc9375c6f7d4a09befe68a5be794ca716c85bd78017439ae"
+  }
+}

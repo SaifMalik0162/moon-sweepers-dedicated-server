@@ -1,0 +1,12 @@
+*
+!Dockerfile
+!Dockerfile.server
+!container/
+!container/**
+!native/
+!native/*.c
+!native/*.h
+!native/*.S
+!native/*.def
+**/__pycache__/
+.private/

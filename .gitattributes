@@ -1,0 +1,7 @@
+* text=auto eol=lf
+*.sh text eol=lf
+container/moon-* text eol=lf
+container/server/* text eol=lf
+Dockerfile text eol=lf
+Dockerfile.server text eol=lf
+*.yaml text eol=lf

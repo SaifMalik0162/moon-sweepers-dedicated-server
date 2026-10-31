@@ -1,0 +1,27 @@
+.env
+.server.env
+.secrets/
+__pycache__/
+*.pyc
+*.tar
+*.tar.gz
+.smoke/
+.private/
+server-backups/
+dist/
+native/out/
+.publish/
+source/
+*.dmp
+*.log
+# Earlier desktop experiment is kept locally, outside the public server repo.
+/Dockerfile
+/compose.yaml
+/compose.import.yaml
+/.env.example
+/container/moon-*
+/container/05-moon-preflight.sh
+/container/MoonSweepers.desktop
+/container/start-x11vnc.sh
+/scripts/setup.py
+/investigation/

@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+steamcmd_dir=/data/steamcmd
+redist_dir=/data/steam-redist
+bootstrap_sha=cebf0046bfd08cf45da6bc094ae47aa39ebf4155e5ede41373b579b8f1071e7c
+mkdir -p "$steamcmd_dir" "$redist_dir" /data/logs
+if [[ ! -x "$steamcmd_dir/steamcmd.sh" ]]; then
+    temporary="$(mktemp /data/steamcmd-bootstrap.XXXXXX)"
+    trap 'rm -f -- "$temporary"' EXIT
+    curl --fail --location --retry 3 --output "$temporary" \
+        https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz
+    printf '%s  %s\n' "$bootstrap_sha" "$temporary" | sha256sum --check --status
+    tar -xzf "$temporary" -C "$steamcmd_dir"
+    rm -f -- "$temporary"
+    trap - EXIT
+fi
+
+if [[ ! -f "$redist_dir/.verified.json" ]] || \
+   ! python3 -c 'import json; a=json.load(open("/data/steam-redist/.verified.json")); b=json.load(open("/opt/moon/bin/redist-lock.json")); raise SystemExit(0 if a.get("manifest")==b["manifest"] else 1)' || \
+   [[ "${MOON_UPDATE_REDIST:-0}" == "1" ]]; then
+    echo "Downloading official Steamworks server redistributables (anonymous app 1007)."
+    "$steamcmd_dir/steamcmd.sh" \
+        +@sSteamCmdForcePlatformType linux \
+        +login anonymous +download_depot 1007 1004 7604377918839582995 +quit \
+        > /data/logs/steamcmd-redist.log 2>&1 || {
+            echo "Steam redistributable download failed; see /data/logs/steamcmd-redist.log." >&2
+            exit 1
+        }
+    python3 - "$redist_dir" "$steamcmd_dir" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+import shutil
+
+root = Path(sys.argv[1])
+cache = Path(sys.argv[2])
+lock = json.loads(Path("/opt/moon/bin/redist-lock.json").read_text())
+result = {key: lock[key] for key in ("appid", "depot", "manifest", "observed_buildid")}
+result["files"] = {}
+for name, expected_hash in lock["files"].items():
+    matches = [file for file in cache.rglob(name) if hashlib.sha256(file.read_bytes()).hexdigest() == expected_hash]
+    if not matches:
+        raise SystemExit(f"Pinned official server redistributable was not downloaded: {name}")
+    shutil.copy2(matches[0], root / name)
+    result["files"][name] = {"path": name, "sha256": expected_hash}
+(root / ".verified.json").write_text(json.dumps(result, indent=2) + "\n")
+print("Official Steamworks server redistributables verified.")
+PY
+fi

@@ -1,0 +1,19 @@
+FROM debian:bookworm-slim AS build
+ARG MINHOOK_COMMIT=c3fcafdc10146beb5919319d0683e44e3c30d537
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64 \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+RUN curl --fail --location --retry 3 \
+    "https://github.com/TsudaKageyu/minhook/archive/${MINHOOK_COMMIT}.tar.gz" \
+    | tar -xz --strip-components=1 \
+    && mkdir -p /out \
+    && cp LICENSE.txt /out/MinHook-LICENSE.txt
+COPY moon_host.c headless_graphics.c headless_graphics.h server_network.c server_network.h client_password.c client_password.h proxy_exports.h version_proxy.S version.def ./host/
+RUN x86_64-w64-mingw32-gcc -shared -O2 -Wall -Wextra -Werror \
+    -Iinclude -Isrc -Ihost host/moon_host.c host/headless_graphics.c host/server_network.c host/client_password.c host/version_proxy.S host/version.def \
+    src/buffer.c src/hook.c src/trampoline.c src/hde/hde64.c \
+    -static-libgcc -lshell32 -luser32 -lgdi32 -Wl,--no-insert-timestamp -o /out/version.dll \
+    && x86_64-w64-mingw32-objdump -p /out/version.dll > /out/version-headers.txt
+FROM scratch AS artifact
+COPY --from=build /out/ /
