@@ -9,7 +9,7 @@ files = [
     'README.md', 'SERVER.md', 'THIRD_PARTY_NOTICES.md', 'LICENSES/MinHook-LICENSE.txt',
     'Dockerfile.server', '.dockerignore', '.gitattributes', '.gitignore',
     'compose.server.yaml', '.server.env.example',
-    'scripts/server_setup.py', 'scripts/install-client.ps1', 'scripts/package.py',
+    'scripts/server_setup.py', 'scripts/install-client.ps1', 'scripts/launch-client.ps1', 'scripts/package.py',
     'native/README.md', 'native/Dockerfile.build', 'native/out/version.dll',
     'native/out/MinHook-LICENSE.txt',
 ]

@@ -84,14 +84,31 @@ their own normal Steam client. Enter the server password in the connection promp
 Complete the game's first-time new-hire intro when
 it appears. The server ID can change on restart; use the current one.
 
-Launch again with saved connection settings:
+The installer creates **Join Moon Sweepers** on your Windows desktop, using the
+game's icon. After that, double-click it and enter the server password to join.
+Its launcher is installed beside the game and reads the saved connection settings;
+you can remove the extracted download folder after installing. The password is
+requested by the game each time and is not stored in the shortcut.
+
+If the client module is already installed, create the shortcut without reinstalling:
+
+```powershell
+.\scripts\install-client.ps1 -Action Shortcut -GamePath "D:\SteamLibrary\steamapps\common\Moon Sweepers"
+```
+
+To update a changed server Steam ID, add `-ServerId NEW_SERVER_STEAM_ID` to that
+command. The existing shortcut will use the updated setting. Pass
+`-NoDesktopShortcut` during installation if you do not want a desktop icon.
+
+You can also launch again from the release folder with saved connection settings:
 
 ```powershell
 .\scripts\install-client.ps1 -Action Launch -GamePath "D:\SteamLibrary\steamapps\common\Moon Sweepers"
 ```
 
 Pass a new `-ServerId` when the server's ID changes. To remove the client module,
-use `-Action Uninstall`; this preserves game saves and Steam settings.
+use `-Action Uninstall`; this removes the owned shortcut and installed launcher,
+and preserves game saves and Steam settings.
 
 ## Save and stop
 

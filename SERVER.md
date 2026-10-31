@@ -130,6 +130,19 @@ and the separate game/query initialization settings in [SteamGameServer_Init](ht
 
 ## 4. Connect the Windows clients
 
+The simplest Windows setup is to extract the release ZIP and run its installer:
+
+~~~powershell
+.\scripts\install-client.ps1 -GamePath "D:\SteamLibrary\steamapps\common\Moon Sweepers" -ServerId YOUR_SERVER_STEAM_ID -Launch
+~~~
+
+It installs the client module and creates a **Join Moon Sweepers** desktop shortcut.
+Subsequent joins only require double-clicking that shortcut and entering the
+server password. The launcher is copied into the game directory, so the shortcut
+continues working after the downloaded ZIP folder is removed. A changed server
+Steam ID can be saved with `-Action Shortcut -ServerId NEW_SERVER_STEAM_ID`; use
+the same `-GamePath`. This also creates a shortcut for an existing installation.
+
 All players need the same supported game build and this release's version.dll
 beside their MoonSweepers.exe. Download the client/server ZIP from
 [GitHub Releases](https://github.com/hexonMD/moon-sweepers-dedicated-server/releases),
