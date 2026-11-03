@@ -52,6 +52,13 @@ In the dedicated roster, only authenticated client identities are marked local;
 the GameServer identity represents the host endpoint, not a player.
 
 The host defaults to save slot 1; `MOON_SLOT` or `-moon-slot` selects 1-5.
+When the world is bound, the dedicated host also enters the game's `MoonCrew`
+world state using the stable internal root `moon-sweepers-slot-N` and the
+GameServer SteamID as host. `MoonCrew.Joined` gates the game's robot pose,
+owned-vehicle, and station synchronization; the synthetic lobby alone does not
+enable those paths. The root is based on the save slot, not the SteamID, so an
+anonymous server identity changing after restart does not change the world key.
+The adapter leaves this state during shutdown.
 The ordinary game save directory is retained within the persistent Wine prefix.
 The module reports a world ready only after CPU initialization has completed and
 the crew session is bound to that same world.
