@@ -12,6 +12,7 @@ __pycache__/
 server-backups/
 dist/
 native/out/
+native/macos/out/
 .publish/
 source/
 *.dmp
