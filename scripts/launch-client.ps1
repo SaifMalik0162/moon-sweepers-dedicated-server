@@ -13,12 +13,14 @@ try {
     $record=Get-Content -LiteralPath $recordPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if (-not (Test-Path -LiteralPath $proxy -PathType Leaf) -or (Get-FileHash -LiteralPath $proxy -Algorithm SHA256).Hash -ne $record.sha256) { throw 'The installed client module changed. Update it using the client installer.' }
     $supported='14f711a6a3b1b7cd803a03f85cc6c6201c5b546ab9b90329533f5cb8ae2e7f13'
-    if ((Get-FileHash -LiteralPath (Join-Path $gameDirectory 'GameAssembly.dll') -Algorithm SHA256).Hash -ne $supported) { throw 'This module supports Moon Sweepers 1.0.5, Steam build 26317497. The installed game differs.' }
+    $gameAssembly=Join-Path $gameDirectory 'GameAssembly.dll'
+    if (-not (Test-Path -LiteralPath $gameAssembly -PathType Leaf)) { throw 'GameAssembly.dll was not found. Recreate the launcher with the correct Moon Sweepers game folder.' }
+    if ((Get-FileHash -LiteralPath $gameAssembly -Algorithm SHA256).Hash -ne $supported) { throw 'Unsupported Moon Sweepers build. This client module requires version 1.0.5 / Steam build 26317497. Check the game build in Steam and use a matching adapter release.' }
     $serverId=[string]$record.server_id
-    if ($serverId -notmatch '^\d{17}$') { throw 'Set the server SteamID with the client installer before joining.' }
+    if ($serverId -notmatch '^\d{17}$') { throw 'No server SteamID is saved. Run install-client.ps1 with -ServerId from the server status output.' }
     $serverNumber=[UInt64]::Parse($serverId)
     $serverType=($serverNumber -shr 52) -band 15
-    if (($serverNumber -shr 56) -ne 1 -or ($serverNumber -band 0xffffffff) -eq 0 -or $serverType -notin @(3,4)) { throw 'The saved server SteamID is invalid. Reinstall with the current server ID.' }
+    if (($serverNumber -shr 56) -ne 1 -or ($serverNumber -band 0xffffffff) -eq 0 -or $serverType -notin @(3,4)) { throw 'The saved server SteamID is invalid. Retrieve server_steam_id from server status, then run install-client.ps1 -Action Configure -GamePath "...\Moon Sweepers" -ServerId NEW_ID.' }
     if (Get-CimInstance Win32_Process -Filter "Name='MoonSweepers.exe'" | Where-Object { $_.ExecutablePath -eq $gameExe }) { throw 'Moon Sweepers is already running. Close it before joining again.' }
     $steam=(Get-ItemProperty -LiteralPath 'HKCU:\Software\Valve\Steam' -ErrorAction SilentlyContinue).SteamExe
     if (-not $steam) { $steam=Join-Path ${env:ProgramFiles(x86)} 'Steam\steam.exe' }

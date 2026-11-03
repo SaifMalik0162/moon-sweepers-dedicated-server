@@ -248,6 +248,30 @@ static bool control_tick(State q,ULONGLONG now) {
  if(save_task||stop_after_save||save_failed){if(save_failed&&!stop_after_save)transition("save-failed");write_state(q);return true;}
  return false;
 }
+static bool client_world_timeout_tick(State q,ULONGLONG now) {
+ static ULONGLONG deadline;
+ static int stage;
+ static bool timed_out;
+ if(!MoonNet_IsClient()){deadline=0;stage=0;timed_out=false;return false;}
+ if(q.bound&&!q.loading){deadline=0;stage=0;timed_out=false;last_error[0]=0;return false;}
+ const char *network_phase=MoonNet_Phase();
+ int current=strcmp(network_phase,"waiting-server-world")==0?1:strcmp(network_phase,"client-downloading-world")==0?2:0;
+ if(timed_out)return true;
+ if(!current){deadline=0;stage=0;return false;}
+ if(current!=stage){
+  stage=current;deadline=now+180000;
+  MoonNet_Diagnostic("client_world_load_started",stage==1?"stage=server-world-wait":"stage=client-world-load");
+ }
+ if(now>=deadline){
+  if(stage==1)error("Client waited 3 minutes for the server world. Check that server status reports ready=true and that its current server_steam_id matches this client.");
+  else error("Client world load exceeded 3 minutes. Check the server log and this PC's moon-host.log; if the server restarted, update the saved server SteamID and reconnect.");
+  transition("client-world-timeout");
+  MoonNet_Diagnostic("client_world_load_timeout",stage==1?"stage=server-world-wait timeout_seconds=180":"stage=client-world-load timeout_seconds=180");
+  timed_out=true;
+  return true;
+ }
+ return false;
+}
 static void host_tick(void) {
  static ULONGLONG next_tick,deadline,retry_at,entered_start;
  static bool direct_load;
@@ -259,6 +283,7 @@ static void host_tick(void) {
  if(control_tick(q,now)){InterlockedExchange(&tick_busy,0);return;}
  if(!ok){transition("managed-error");write_state(q);InterlockedExchange(&tick_busy,0);return;}
  if(MoonNet_IsStopped()){transition("disconnected");write_state(q);InterlockedExchange(&tick_busy,0);return;}
+ if(client_world_timeout_tick(q,now)){write_state(q);InterlockedExchange(&tick_busy,0);return;}
  if(!autostart){transition(MoonNet_IsClient()?(q.bound&&!q.loading?"client-world-bound":MoonNet_Phase()):"manual");write_state(q);InterlockedExchange(&tick_busy,0);return;}
  if(q.game&&!q.loading&&q.bound&&q.lobby&&q.host&&q.shift){last_error[0]=0;transition("world-bound");}
  else if(q.game&&q.lobby&&q.host)transition(q.loading?"loading":"world-scene");

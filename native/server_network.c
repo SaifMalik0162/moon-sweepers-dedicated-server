@@ -348,7 +348,7 @@ static void drop_peer(Peer *p,const char *why){
 }
 static void retry_peer_auth(Peer *p){
  if(!p||!p->id)return;
- if(p->auth_retries>=2){drop_peer(p,"Steam could not validate the player session after retries");return;}
+ if(p->auth_retries>=2){drop_peer(p,"Steam could not validate this session after retries. Restart Steam, make sure it is online on the account that owns Moon Sweepers, and try again.");return;}
  uint64_t id=p->id;p->auth_retries++;p->heard=GetTickCount64();
  diagnostic_event("steam_auth_retry",id,false,"reason=user_not_connected");
  if(send_control(id,AUTH_RETRY,NULL,0)){sdk.end_auth(server_api,id);p->name[0]=0;}
@@ -359,7 +359,7 @@ static void stop_client(const char *reason,const char *state){
 }
 static bool client_timed_out(ULONGLONG now){
  ULONGLONG heard=client_last_heard?client_last_heard:client_auth_started;
- if(heard&&now>=heard&&now-heard>(client_connected?45000:60000)){stop_client("network: server heartbeat timed out","client-server-timeout");return true;}
+ if(heard&&now>=heard&&now-heard>(client_connected?45000:60000)){stop_client("network: no response from the server. It may be offline, still starting, or the saved server SteamID may be out of date. Check the current server_steam_id in server status and update the launcher.","client-server-timeout");return true;}
  return false;
 }
 static void consume_control(uint64_t from,const ControlHeader *header,const uint8_t *payload){
@@ -379,12 +379,19 @@ static void consume_control(uint64_t from,const ControlHeader *header,const uint
    if(!*p->name)snprintf(p->name,sizeof(p->name),"Crewmate");
    int result=sdk.begin_auth(server_api,auth->ticket,(int)auth->bytes,from);
    {char details[96];snprintf(details,sizeof(details),"result=%d ticket_bytes=%u ticket=redacted",result,auth->bytes);diagnostic_event("steam_ticket_validation_started",from,true,details);}
-   if(result!=0){char why[96];snprintf(why,sizeof(why),"Steam rejected auth ticket (%d)",result);drop_peer(p,why);}
+   if(result!=0){char why[224];snprintf(why,sizeof(why),"Steam rejected the session ticket (result %d). Restart Steam, make sure it is online on the account that owns Moon Sweepers, and try again.",result);drop_peer(p,why);}
   } else if(p){p->heard=GetTickCount64();if(header->type==GOODBYE)drop_peer(p,"Disconnected");else if(header->type==PING&&p->authenticated)send_roster(from);}
  } else if(from==server_id){
-  if(header->type==PASSWORD_REJECTED&&header->bytes==0){diagnostic_event("server_password_rejected",from,true,"secret=redacted");MoonPassword_NotifyRejected();stop_client("network: incorrect server password","client-wrong-password");}
+  if(header->type==PASSWORD_REJECTED&&header->bytes==0){diagnostic_event("server_password_rejected",from,true,"secret=redacted");MoonPassword_NotifyRejected();stop_client("network: server password was rejected. Re-enter the exact join password from the host (not your Steam password).","client-wrong-password");}
   else if(header->type==AUTH_RETRY&&header->bytes==0){if(client_ticket)sdk.cancel_ticket(user_api,client_ticket);client_ticket=0;SecureZeroMemory(ticket_bytes,sizeof(ticket_bytes));ticket_size=0;ticket_ready=false;ticket_failed=false;ticket_requested_at=GetTickCount64();next_auth=0;client_last_heard=GetTickCount64();diagnostic_event("steam_auth_ticket_refresh_requested",from,true,"reason=user_not_connected");phase("client-refreshing-ticket");}
-  else if(header->type==REJECT){diagnostic_event("server_rejected_client",from,true,"reason=server_reject");stop_client("network: server rejected authentication/session","client-rejected");}
+  else if(header->type==REJECT){
+   char reason[241]={0};uint32_t length=header->bytes;if(length>sizeof(reason)-1)length=sizeof(reason)-1;
+   for(uint32_t i=0;i<length;i++){unsigned char c=payload[i];reason[i]=(c>=32&&c<=126)?(char)c:'?';}
+   char message[384];
+   if(length)snprintf(message,sizeof(message),"network: server rejected the join: %s",reason);
+   else snprintf(message,sizeof(message),"network: server rejected the join. Check Steam ownership and online status, then ask the host to check its server log.");
+   diagnostic_event("server_rejected_client",from,true,"reason=server_reject");stop_client(message,"client-rejected");
+  }
   else if(header->type==WAIT_WORLD&&header->bytes==0){client_last_heard=GetTickCount64();diagnostic_event("waiting_for_world",from,true,NULL);phase("waiting-server-world");}
   else if(header->type==ROSTER&&header->bytes>=12){
    const RosterPayload *r=(const RosterPayload *)payload;
@@ -451,7 +458,7 @@ static void handle_server_callback(CallbackMessage *message){
     even on Win64: SteamID0, response8, ownerSteamID12. */
  }else if(message->id==143&&message->size>=20){
   uint64_t id;int32_t response;memcpy(&id,message->data,8);memcpy(&response,(uint8_t *)message->data+8,4);Peer *p=peer(id,false);
-  if(p){int license=response==0?sdk.has_license(server_api,id,5335510):-1;if(validation_logs++<32){char details[80];snprintf(details,sizeof(details),"response=%d game_license=%d",response,license);diagnostic_event("steam_authentication_result",id,false,details);}if(response==0&&license==0){p->authenticated=true;p->heard=GetTickCount64();phase("server-peer-authenticated");broadcast_roster();}else if(response==1){/* Steam says the user is not connected; refresh the ticket before rejecting. */retry_peer_auth(p);}else drop_peer(p,"Steam authentication or Moon Sweepers license validation failed");}
+  if(p){int license=response==0?sdk.has_license(server_api,id,5335510):-1;if(validation_logs++<32){char details[80];snprintf(details,sizeof(details),"response=%d game_license=%d",response,license);diagnostic_event("steam_authentication_result",id,false,details);}if(response==0&&license==0){p->authenticated=true;p->heard=GetTickCount64();phase("server-peer-authenticated");broadcast_roster();}else if(response==1){/* Steam says the user is not connected; refresh the ticket before rejecting. */retry_peer_auth(p);}else if(response==2)drop_peer(p,"Steam reports that this account has no Moon Sweepers license or its session ticket expired. Confirm game ownership, restart Steam, and try again.");else if(response!=0)drop_peer(p,"Steam rejected this session (validation response code recorded in the server log). Restart Steam, check for another active game session, and try again.");else drop_peer(p,"Steam validated the session but could not confirm Moon Sweepers ownership. Check that this Steam account owns the game, then restart Steam and try again.");}
  }
 }
 static bool __cdecl observe_callback(int32_t pipe,CallbackMessage *message){
@@ -617,9 +624,9 @@ static void tick_client(void){
  if(!user_api){user_api=sdk.user();messages_api=sdk.client_messages();if(!user_api||!messages_api)return;sockets_api=sdk.client_sockets();utils_api=sdk.utils();if(utils_api)sdk.init_relay(utils_api);self_id=sdk.user_id(user_api);char text[128];snprintf(text,sizeof(text),"Client SteamID: %llu",(unsigned long long)self_id);report(text);diagnostic_event("client_steam_ready",server_id,true,"identity=present");}
  if(!client_password_ready){int result=MoonPassword_Read(client_password,sizeof(client_password));if(result==0){phase("client-waiting-password");return;}if(result<0){stop_client("network: password entry cancelled","client-password-cancelled");return;}if(!password_size(client_password,&client_password_length)){stop_client("network: password must contain 8..128 printable ASCII characters","client-password-invalid");return;}client_password_ready=true;diagnostic_event("client_password_entered",server_id,true,"secret=redacted");}
  ULONGLONG now=GetTickCount64();
- if(!client_ticket){NetIdentity remote=identity(server_id);ticket_size=0;client_ticket=sdk.auth_ticket(user_api,ticket_bytes,MAX_TICKET,&ticket_size,&remote);ticket_requested_at=now;ticket_ready=false;ticket_failed=false;if(!client_ticket||!ticket_size||ticket_size>MAX_TICKET){diagnostic_event("steam_ticket_request_failed",server_id,true,"ticket=redacted");stop_client("network: Steam could not issue an auth ticket","client-ticket-failed");return;}char details[48];snprintf(details,sizeof(details),"ticket_bytes=%u ticket=redacted",ticket_size);diagnostic_event("steam_ticket_requested",server_id,true,details);phase("client-waiting-ticket");}
- if(ticket_failed){stop_client("network: Steam rejected the auth ticket","client-ticket-rejected-by-steam");return;}
- if(!ticket_ready&&now-ticket_requested_at>30000){diagnostic_event("steam_ticket_timeout",server_id,true,"ticket=redacted");stop_client("network: Steam auth ticket callback timed out","client-ticket-timeout");return;}
+ if(!client_ticket){NetIdentity remote=identity(server_id);ticket_size=0;client_ticket=sdk.auth_ticket(user_api,ticket_bytes,MAX_TICKET,&ticket_size,&remote);ticket_requested_at=now;ticket_ready=false;ticket_failed=false;if(!client_ticket||!ticket_size||ticket_size>MAX_TICKET){diagnostic_event("steam_ticket_request_failed",server_id,true,"ticket=redacted");stop_client("network: Steam could not issue a session ticket. Open Steam, sign into the account that owns Moon Sweepers, wait for Steam to come online, and try again.","client-ticket-failed");return;}char details[48];snprintf(details,sizeof(details),"ticket_bytes=%u ticket=redacted",ticket_size);diagnostic_event("steam_ticket_requested",server_id,true,details);phase("client-waiting-ticket");}
+ if(ticket_failed){stop_client("network: Steam rejected the session ticket. Restart Steam, make sure it is online on the account that owns Moon Sweepers, and try again.","client-ticket-rejected-by-steam");return;}
+ if(!ticket_ready&&now-ticket_requested_at>30000){diagnostic_event("steam_ticket_timeout",server_id,true,"ticket=redacted");stop_client("network: Steam did not issue a session ticket in time. Open Steam, wait until it is online, and try again.","client-ticket-timeout");return;}
  if(ticket_ready&&!client_connected&&now>=next_auth){
   next_auth=now+3000;AuthPayload auth={0};auth.bytes=ticket_size;auth.password_length=(uint16_t)client_password_length;memcpy(auth.password,client_password,client_password_length);Object *name=call(game.persona,NULL,NULL);
   if(name)WideCharToMultiByte(CP_UTF8,0,il.string_chars(name),il.string_length(name),auth.name,63,NULL,NULL);

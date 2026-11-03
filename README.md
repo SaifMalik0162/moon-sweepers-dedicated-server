@@ -33,6 +33,14 @@ Status prints the server `server_steam_id`; with a GSLT, the ID persists across
 restarts. Read the complete [Ubuntu installation guide](SERVER.md)
 for the Windows-to-Ubuntu copy command, settings, backups, and troubleshooting.
 
+For an anonymous server, get the current ID after a restart with:
+
+```sh
+docker compose --env-file .server.env -f compose.server.yaml exec -T server /opt/moon/bin/entrypoint status
+```
+
+Copy the value of `server_steam_id` from the JSON output.
+
 No personal Steam username or password is used. The image contains Wine and our module;
 it imports your game files from a read-only mount and downloads only Valve's
 official server redistributables anonymously. Steam tickets and game ownership are
@@ -83,7 +91,9 @@ Alternatively, install the DLL with the script and set this game's Steam launch
 options to `-moon-connect YOUR_SERVER_STEAM_ID`. Each player remains signed into
 their own normal Steam client. Enter the server password in the connection prompt.
 Complete the game's first-time new-hire intro when
-it appears. The server ID can change on restart; use the current one.
+it appears. An anonymous server ID can change on restart. On TrueNAS or Ubuntu,
+get the latest `server_steam_id` with the status command above before players
+join.
 
 The installer creates **Join Moon Sweepers** on your Windows desktop, using the
 game's icon. After that, double-click it and enter the server password to join.
@@ -97,9 +107,17 @@ If the client module is already installed, create the shortcut without reinstall
 .\scripts\install-client.ps1 -Action Shortcut -GamePath "D:\SteamLibrary\steamapps\common\Moon Sweepers"
 ```
 
-To update a changed server Steam ID, add `-ServerId NEW_SERVER_STEAM_ID` to that
-command. The existing shortcut will use the updated setting. Pass
-`-NoDesktopShortcut` during installation if you do not want a desktop icon.
+To update the saved ID without creating or changing a shortcut, run:
+
+```powershell
+.\scripts\install-client.ps1 -Action Configure -GamePath "D:\SteamLibrary\steamapps\common\Moon Sweepers" -ServerId NEW_SERVER_STEAM_ID
+```
+
+This updates the connection settings read by the existing shortcut and launcher.
+Use `-NoDesktopShortcut` during installation if you do not want a desktop icon.
+If Windows cannot save a shortcut to a redirected Desktop, installation still
+finishes and `-Launch` still starts the game. You can also run the installed
+`moon-client-launch.ps1` beside `MoonSweepers.exe` directly.
 
 You can also launch again from the release folder with saved connection settings:
 
@@ -107,9 +125,27 @@ You can also launch again from the release folder with saved connection settings
 .\scripts\install-client.ps1 -Action Launch -GamePath "D:\SteamLibrary\steamapps\common\Moon Sweepers"
 ```
 
-Pass a new `-ServerId` when the server's ID changes. To remove the client module,
-use `-Action Uninstall`; this removes the owned shortcut and installed launcher,
-and preserves game saves and Steam settings.
+Use `-Action Configure -ServerId NEW_SERVER_STEAM_ID` to save a changed ID before
+joining. You can also pass `-ServerId NEW_SERVER_STEAM_ID` with `-Action Launch`
+to update the saved ID and start in one command. To remove the client module, use
+`-Action Uninstall`; this removes the owned shortcut and installed launcher, and
+preserves game saves and Steam settings.
+
+If a join fails, check the timestamped `moon-host.log` beside
+`MoonSweepers.exe`. Add `-moon-diagnostics` to Steam launch options to record
+the client's join stages there. The server log is available with:
+
+```sh
+docker compose --env-file .server.env -f compose.server.yaml logs --tail 100 server
+```
+
+Unsupported game builds need a matching adapter release. Steam ticket or
+ownership errors mean the player should confirm Steam is online and signed into
+the account that owns the game. A password rejection means re-entering the
+server's join password. A world-load timeout means checking that the server is
+ready and that the client is using its current ID. Persistent server identity
+using a GSLT is a separate server configuration; it is not required to update a
+client after an anonymous server restart.
 
 ## Save and stop
 

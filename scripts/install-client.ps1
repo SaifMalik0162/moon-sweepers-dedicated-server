@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('Install','Launch','Shortcut','Uninstall')][string]$Action='Install',
+    [ValidateSet('Install','Launch','Shortcut','Configure','Uninstall')][string]$Action='Install',
     [Parameter(Mandatory=$true)][string]$GamePath,
     [string]$ServerId='',
     [switch]$Launch,
@@ -24,6 +24,7 @@ if ($ServerId) {
     $serverType=($serverNumber -shr 52) -band 15
     if (($serverNumber -shr 56) -ne 1 -or ($serverNumber -band 0xffffffff) -eq 0 -or $serverType -notin @(3,4)) { throw 'ServerId must be a valid anonymous or persistent GameServer SteamID.' }
 }
+if ($Action -eq 'Configure' -and -not $ServerId) { throw 'Action Configure requires -ServerId with the current server SteamID.' }
 function Get-RecordValue([string]$Name) {
     if ($record -and $record.PSObject.Properties[$Name]) { return $record.PSObject.Properties[$Name].Value }
     return $null
@@ -61,7 +62,6 @@ function New-ClientShortcut {
         $recorded=(Get-RecordValue 'shortcut_path') -eq $ShortcutPath -and (Get-RecordValue 'shortcut_sha256') -eq (Get-FileHash -LiteralPath $ShortcutPath -Algorithm SHA256).Hash
         if (-not $recorded -and ($shortcut.TargetPath -ne $powershell -or $shortcut.Arguments -ne $shortcutArguments)) { throw 'That shortcut already exists and belongs to another application or was changed.' }
     }
-    Install-Launcher
     $shortcut.TargetPath=$powershell
     $shortcut.Arguments=$shortcutArguments
     $shortcut.WorkingDirectory=$gameDirectory
@@ -93,7 +93,9 @@ if ($Action -eq 'Uninstall') {
     exit
 }
 $supported='14f711a6a3b1b7cd803a03f85cc6c6201c5b546ab9b90329533f5cb8ae2e7f13'
-if ((Get-FileHash -LiteralPath (Join-Path $gameDirectory 'GameAssembly.dll') -Algorithm SHA256).Hash -ne $supported) { throw 'This module supports Moon Sweepers 1.0.5, Steam build 26317497. The installed game differs.' }
+$gameAssembly=Join-Path $gameDirectory 'GameAssembly.dll'
+if (-not (Test-Path -LiteralPath $gameAssembly -PathType Leaf)) { throw 'GameAssembly.dll was not found. Verify -GamePath points to the Moon Sweepers installation folder.' }
+if ((Get-FileHash -LiteralPath $gameAssembly -Algorithm SHA256).Hash -ne $supported) { throw 'Unsupported Moon Sweepers build. This client module requires version 1.0.5 / Steam build 26317497. Check the game build in Steam and use a matching adapter release.' }
 if ($Action -eq 'Install') {
     if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) { throw 'The release is missing native/out/version.dll. Build it with native/Dockerfile.build.' }
     $artifactHash=(Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash
@@ -109,13 +111,22 @@ if ($ServerId) {
     $record.server_id=$ServerId
 }
 Save-Record
-if ($Action -eq 'Shortcut' -or ($Action -eq 'Install' -and -not $NoDesktopShortcut -and $record.server_id)) { New-ClientShortcut }
-elseif ($Action -eq 'Install') { Install-Launcher }
+if ($Action -in @('Install','Shortcut','Configure')) { Install-Launcher }
+if (-not $NoDesktopShortcut -and $Action -eq 'Shortcut') { New-ClientShortcut }
+elseif (-not $NoDesktopShortcut -and $Action -eq 'Install' -and $record.server_id) {
+    try { New-ClientShortcut }
+    catch {
+        $manualLaunch='powershell.exe -NoProfile -ExecutionPolicy Bypass -File "'+$installedLauncher+'" -ShowErrors'
+        Write-Warning ('The client is installed, but the desktop shortcut could not be saved: '+$_.Exception.Message+' You can still join with -Action Launch or run: '+$manualLaunch)
+    }
+}
+elseif ($NoDesktopShortcut -and $Action -in @('Install','Shortcut')) { Write-Output 'Desktop shortcut creation skipped by -NoDesktopShortcut.' }
 if ($Action -eq 'Install') { Write-Output 'Moon Sweepers dedicated client module installed.' }
+if ($Action -eq 'Configure') { Write-Output 'Saved the server SteamID. The existing desktop shortcut and installed launcher will use it.' }
 if ($Action -eq 'Launch' -or $Launch) {
     if (-not (Test-Path -LiteralPath $launcherSource -PathType Leaf)) { throw 'The release is missing scripts/launch-client.ps1.' }
     & $launcherSource -GamePath $gameDirectory
 } elseif ($Action -eq 'Install') {
-    if (Get-RecordValue 'shortcut_path') { Write-Output 'Next time, double-click Join Moon Sweepers on your desktop or use -Action Launch.' }
+    if (-not $NoDesktopShortcut -and (Get-RecordValue 'shortcut_path')) { Write-Output 'Next time, double-click Join Moon Sweepers on your desktop or use -Action Launch.' }
     else { Write-Output 'Use -Action Launch to join, or -Action Shortcut -ServerId YOUR_SERVER_ID to create a desktop shortcut.' }
 }

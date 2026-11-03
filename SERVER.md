@@ -119,6 +119,17 @@ heartbeat age. Container health requires ready=true and a heartbeat no older tha
 `join_transport`, `game_port`, and `query_port`. A rejected GSLT does not silently
 fall back to anonymous login.
 
+For an anonymous server, read the current ID after every restart with:
+
+~~~sh
+docker compose --env-file .server.env -f compose.server.yaml exec -T server /opt/moon/bin/entrypoint status
+~~~
+
+Copy `server_steam_id` from the JSON output. Anonymous IDs can change at restart.
+Using a GSLT for a persistent identity is a separate server configuration and
+requires deploying a build that includes the GSLT support; client-side ID updates
+work independently.
+
 ## Ports and connection method
 
 Set these in `.server.env` to choose the Steam GameServer API ports:
@@ -159,6 +170,11 @@ installs the client module and launches the game without trying to create a
 desktop shortcut. To create one later, run the installer with
 `-Action Shortcut -GamePath "..." -ServerId YOUR_SERVER_STEAM_ID`.
 
+If you use the install command without `-NoDesktopShortcut`, shortcut creation is
+best-effort. A redirected or unwritable Windows Desktop can prevent the `.lnk`
+file from being saved, but the module install and `-Launch` continue. The launcher
+is also copied beside `MoonSweepers.exe` as `moon-client-launch.ps1`.
+
 All players need the same supported game build and the client `version.dll` from
 the same fork revision as the server. The upstream `v0.1.0-alpha.2` ZIP does not
 include these fork changes, including support for persistent server IDs. Use the
@@ -192,6 +208,21 @@ password or allowlist settings:
 ~~~sh
 docker compose --env-file .server.env -f compose.server.yaml up -d
 ~~~
+
+After an anonymous server restart, update an existing player's saved ID without
+reinstalling the module or changing their desktop shortcut:
+
+~~~powershell
+.\scripts\install-client.ps1 -Action Configure -GamePath "D:\SteamLibrary\steamapps\common\Moon Sweepers" -ServerId NEW_SERVER_STEAM_ID
+~~~
+
+The existing shortcut and installed launcher read the updated setting. To collect
+join diagnostics, add `-moon-diagnostics` to that player's Steam launch options
+and inspect `moon-host.log` beside `MoonSweepers.exe`. On the server, use
+`docker compose --env-file .server.env -f compose.server.yaml logs --tail 100 server`.
+The client reports unsupported builds, Steam ticket/ownership rejection, password
+rejection, stale or unreachable server IDs, and world-load timeouts with next
+steps in its log.
 
 The server module and client module are the same binary; the launch flags select
 their roles. Client world-download and gameplay behavior must match the tested
