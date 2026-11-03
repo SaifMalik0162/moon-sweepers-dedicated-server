@@ -33,6 +33,14 @@ typedef struct _MonoMethod MonoMethod;
 typedef struct _MonoMethodSignature MonoSignature;
 typedef struct _MonoObject MonoObject;
 typedef struct { int32_t user; int32_t id; void *data; int32_t size; } SteamCallbackMessage;
+typedef struct { void *data; int32_t size; uint32_t connection; } SteamMessagePrefix;
+
+typedef struct {
+    uint64_t polls, packets, bytes;
+    uint64_t started_ms, last_packet_ms, last_report_ms;
+    unsigned last_kind;
+    bool active, idle_reported;
+} SteamReceiveTrace;
 
 typedef struct {
     const char *(*image_get_name)(MonoImage *image);
@@ -45,13 +53,22 @@ typedef struct {
     const char *(*class_get_namespace)(MonoClass *klass);
     MonoSignature *(*method_signature)(MonoMethod *method);
     uint32_t (*signature_get_param_count)(MonoSignature *signature);
+    uintptr_t (*array_length)(MonoObject *array);
 } MonoApi;
+
+typedef struct {
+    uint64_t packets, bytes;
+    uint64_t started_ms, last_packet_ms, last_report_ms;
+    bool active, idle_reported;
+} ClientReceiveTrace;
 
 static char executable_path[4096];
 static char app_root[4096];
 static char log_path[4096];
 static bool compatible_build;
 static MonoApi mono;
+static ClientReceiveTrace client_receive_traces[2];
+static SteamReceiveTrace steam_receive_traces[2];
 static void log_line(const char *format, ...);
 static void client_log(const char *message);
 static bool resolve_mono_api(void);
@@ -62,13 +79,145 @@ static bool patch_loaded_image(const char *leaf);
 static bool observe_steam_callback(int32_t pipe, SteamCallbackMessage *message);
 static void *(*real_dlsym)(void *handle, const char *symbol);
 static void *(*real_dlopen)(const char *path, int mode);
+static int (*real_steam_receive_messages)(void *messages, int channel, SteamMessagePrefix **output, int max_messages);
 static bool (*real_steam_next_callback)(int32_t pipe, SteamCallbackMessage *message);
 static MonoObject *(*real_runtime_invoke)(MonoMethod *method, void *instance, void **parameters, MonoObject **exception);
 static volatile int observed_game_invocation;
 static volatile int steam_api_reported;
 
+static uint64_t monotonic_milliseconds(void) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 0;
+    return (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
+}
+
+static int receive_channel_index(int channel) {
+    if (channel == 1) return 0;
+    if (channel == 2) return 1;
+    return -1;
+}
+
+static const char *receive_channel_name(int channel) {
+    return channel == 1 ? "world" : "transfer";
+}
+
+static int observe_steam_receive_messages(void *messages, int channel, SteamMessagePrefix **output, int max_messages) {
+    if (!real_steam_receive_messages) return -1;
+    int count = real_steam_receive_messages(messages, channel, output, max_messages);
+    int index = receive_channel_index(channel);
+    if (index < 0) return count;
+
+    uint64_t now = monotonic_milliseconds();
+    SteamReceiveTrace *trace = &steam_receive_traces[index];
+    if (!trace->active) {
+        trace->active = true;
+        trace->started_ms = now;
+        log_line("client_%s_receive_poll_started channel=%d", receive_channel_name(channel), channel);
+    }
+    trace->polls++;
+    if (count > 0 && output) {
+        unsigned first_kind = 0;
+        int first_bytes = 0;
+        int limit = count < max_messages ? count : max_messages;
+        if (limit > 256) limit = 256;
+        for (int i = 0; i < limit; i++) {
+            SteamMessagePrefix *message = output[i];
+            if (!message || message->size <= 0) continue;
+            unsigned kind = message->data ? *(const uint8_t *)message->data : 0;
+            if (trace->packets == 0 && first_bytes == 0) {
+                first_kind = kind;
+                first_bytes = message->size;
+            }
+            trace->packets++;
+            trace->bytes += (uint64_t)message->size;
+            trace->last_kind = kind;
+        }
+        trace->last_packet_ms = now;
+        trace->idle_reported = false;
+        if (first_bytes > 0) {
+            log_line("client_%s_receive_started channel=%d first_kind=0x%02x first_bytes=%d",
+                     receive_channel_name(channel), channel, first_kind, first_bytes);
+        }
+        if (!trace->last_report_ms || now - trace->last_report_ms >= 2000) {
+            log_line("client_%s_receive_progress channel=%d polls=%llu packets=%llu bytes=%llu last_kind=0x%02x elapsed_ms=%llu",
+                     receive_channel_name(channel), channel, (unsigned long long)trace->polls,
+                     (unsigned long long)trace->packets, (unsigned long long)trace->bytes,
+                     trace->last_kind, (unsigned long long)(now - trace->started_ms));
+            trace->last_report_ms = now;
+        }
+    } else if (!trace->idle_reported && now - (trace->last_packet_ms ? trace->last_packet_ms : trace->started_ms) >= 3000) {
+        uint64_t last_activity = trace->last_packet_ms ? trace->last_packet_ms : trace->started_ms;
+        log_line("client_%s_receive_idle channel=%d polls=%llu packets=%llu bytes=%llu idle_ms=%llu",
+                 receive_channel_name(channel), channel, (unsigned long long)trace->polls,
+                 (unsigned long long)trace->packets, (unsigned long long)trace->bytes,
+                 (unsigned long long)(now - last_activity));
+        trace->idle_reported = true;
+    }
+    return count;
+}
+
+static int receive_method_index(MonoMethod *method, const char **name) {
+    if (!mono.method_get_class || !mono.class_get_namespace || !mono.class_get_name || !mono.method_get_name) return -1;
+    MonoClass *klass = mono.method_get_class(method);
+    const char *name_space = klass ? mono.class_get_namespace(klass) : NULL;
+    const char *class_name = klass ? mono.class_get_name(klass) : NULL;
+    const char *method_name = mono.method_get_name(method);
+    if (!name_space || strcmp(name_space, "MoonCleaners") != 0 || !class_name ||
+        strcmp(class_name, "MoonCrewSession") != 0 || !method_name) return -1;
+    if (strcmp(method_name, "ReceiveWorld") == 0) { *name = "ReceiveWorld"; return 0; }
+    if (strcmp(method_name, "ReceiveTransfer") == 0) { *name = "ReceiveTransfer"; return 1; }
+    return -1;
+}
+
+static void log_receive_progress(uint64_t now) {
+    for (unsigned i = 0; i < 2; i++) {
+        ClientReceiveTrace *trace = &client_receive_traces[i];
+        if (trace->active && !trace->idle_reported && now - trace->last_packet_ms >= 3000) {
+            log_line("client_game_receive_idle method=%s packets=%llu bytes=%llu idle_ms=%llu",
+                     i == 0 ? "ReceiveWorld" : "ReceiveTransfer",
+                     (unsigned long long)trace->packets, (unsigned long long)trace->bytes,
+                     (unsigned long long)(now - trace->last_packet_ms));
+            trace->idle_reported = true;
+        }
+    }
+}
+
 static MonoObject *observe_runtime_invoke(MonoMethod *method, void *instance, void **parameters, MonoObject **exception) {
-    MonoObject *result = real_runtime_invoke(method, instance, parameters, exception);
+    const char *receive_name = NULL;
+    int receive_index = receive_method_index(method, &receive_name);
+    uintptr_t receive_bytes = 0;
+    if (receive_index >= 0 && parameters && parameters[1] && mono.array_length) {
+        MonoObject *array = (MonoObject *)parameters[1];
+        if (array) receive_bytes = mono.array_length(array);
+    }
+    MonoObject *local_exception = NULL;
+    MonoObject **exception_out = exception ? exception : &local_exception;
+    MonoObject *result = real_runtime_invoke(method, instance, parameters, exception_out);
+    if (receive_index >= 0) {
+        uint64_t now = monotonic_milliseconds();
+        ClientReceiveTrace *trace = &client_receive_traces[receive_index];
+        if (!trace->active) {
+            trace->active = true;
+            trace->started_ms = now;
+            log_line("client_game_receive_started method=%s", receive_name);
+        }
+        trace->packets++;
+        trace->bytes += receive_bytes;
+        trace->last_packet_ms = now;
+        trace->idle_reported = false;
+        if (!trace->last_report_ms || now - trace->last_report_ms >= 2000) {
+            log_line("client_game_receive_progress method=%s packets=%llu bytes=%llu elapsed_ms=%llu",
+                     receive_name, (unsigned long long)trace->packets,
+                     (unsigned long long)trace->bytes,
+                     (unsigned long long)(now - trace->started_ms));
+            trace->last_report_ms = now;
+        }
+        if (*exception_out) {
+            log_line("client_game_receive_exception method=%s packets=%llu bytes=%llu",
+                     receive_name, (unsigned long long)trace->packets,
+                     (unsigned long long)trace->bytes);
+        }
+    }
     if (!__atomic_load_n(&observed_game_invocation, __ATOMIC_RELAXED) && mono.method_get_class &&
         mono.class_get_namespace && mono.class_get_name && mono.class_get_image && mono.image_get_name) {
         MonoClass *klass = mono.method_get_class(method);
@@ -83,7 +232,10 @@ static MonoObject *observe_runtime_invoke(MonoMethod *method, void *instance, vo
                 log_line("mono_bridge initialized=no");
         }
     }
-    if (MoonMac_IsMoonSteamUpdate(method)) MoonMac_GameBridgeUpdate();
+    if (MoonMac_IsMoonSteamUpdate(method)) {
+        MoonMac_GameBridgeUpdate();
+        log_receive_progress(monotonic_milliseconds());
+    }
     return result;
 }
 
@@ -102,6 +254,11 @@ static void *observe_dlsym(void *handle, const char *symbol) {
         memcpy(&real_steam_next_callback, &result, sizeof(result));
         log_line("runtime_hook installed=SteamAPI_ManualDispatch_GetNextCallback");
         return (void *)&observe_steam_callback;
+    }
+    if (compatible_build && symbol && strcmp(symbol, "SteamAPI_ISteamNetworkingMessages_ReceiveMessagesOnChannel") == 0 && result) {
+        if (!real_steam_receive_messages) memcpy(&real_steam_receive_messages, &result, sizeof(result));
+        log_line("runtime_hook installed=SteamAPI_ISteamNetworkingMessages_ReceiveMessagesOnChannel");
+        return (void *)&observe_steam_receive_messages;
     }
     return result;
 }
@@ -346,6 +503,8 @@ static bool resolve_mono_api(void) {
     RESOLVE(method_signature, "mono_method_signature");
     RESOLVE(signature_get_param_count, "mono_signature_get_param_count");
 #undef RESOLVE
+    void *array_length = dlsym(RTLD_DEFAULT, "mono_array_length");
+    memcpy(&mono.array_length, &array_length, sizeof(array_length));
     return true;
 }
 

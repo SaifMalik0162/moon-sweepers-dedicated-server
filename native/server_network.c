@@ -82,6 +82,9 @@ static struct {int32_t id,size;} callback_shapes[32];static unsigned callback_sh
 static void *sockets_api,*utils_api;
 typedef struct {uint64_t id;bool authenticated;unsigned auth_retries;char name[64];ULONGLONG heard;} Peer;
 static Peer peers[MAX_PEERS];
+typedef struct {uint64_t packets,bytes;ULONGLONG started,last_packet,last_report;unsigned last_kind;bool active,stall_reported;} TransferFlow;
+typedef struct {uint64_t id;TransferFlow flows[2][3];} TransferPeer;
+static TransferPeer transfer_peers[MAX_PEERS+1];
 
 static struct {
  const void **(__cdecl *assemblies)(void *,size_t *);void *(__cdecl *domain)(void);
@@ -154,6 +157,7 @@ static struct {
 
 static void report(const char *text){if(logger)logger(text);}
 static void diagnostic_event(const char *event,uint64_t peer_id,bool create_peer,const char *details);
+static void transfer_stopped(uint64_t peer_id,const char *reason);
 static bool ensure_dedicated_crew_world(void);
 static void phase(const char *text){if(strcmp(net_phase,text)!=0){net_phase=text;report(text);diagnostic_event("network_phase",0,false,text);}}
 static void env(const char *key,char *out,size_t size){DWORD n=GetEnvironmentVariableA(key,out,(DWORD)size);if(!n||n>=size)out[0]=0;}
@@ -343,6 +347,7 @@ static void broadcast_roster(void){if(mode!=MODE_SERVER||!backend_ready)return;p
 static void drop_peer(Peer *p,const char *why){
  if(!p||!p->id)return;
  uint64_t id=p->id;diagnostic_event("peer_disconnected",id,false,why);report(why);send_control(id,REJECT,why,(uint32_t)strlen(why));
+ transfer_stopped(id,why);
  if(server_api)sdk.end_auth(server_api,id);
  NetIdentity remote=identity(id);if(messages_api)sdk.close(messages_api,&remote);memset(p,0,sizeof(*p));forget_peer_correlation(id);broadcast_roster();
 }
@@ -355,7 +360,7 @@ static void retry_peer_auth(Peer *p){
  else drop_peer(p,"Could not request a fresh Steam auth ticket");
 }
 static void stop_client(const char *reason,const char *state){
- report(reason);client_stopped=true;MoonNet_Shutdown();clear_members();phase(state);
+ report(reason);transfer_stopped(server_id,reason);client_stopped=true;MoonNet_Shutdown();clear_members();phase(state);
 }
 static bool client_timed_out(ULONGLONG now){
  ULONGLONG heard=client_last_heard?client_last_heard:client_auth_started;
@@ -502,7 +507,43 @@ static bool __cdecl net_close(const void *remote,const Method *info){(void)info;
 static bool __cdecl net_close_channel(const void *remote,int channel,const Method *info){(void)info;return messages_api&&marshal.close_channel(messages_api,remote,channel,marshal.close_channel_method);}
 static int __cdecl net_info(const void *remote,void *details,void *status,const Method *info){(void)info;return messages_api?marshal.info(messages_api,remote,details,status,marshal.info_method):0;}
 static unsigned packet_kind(Object *array){return array&&il.array_length(array)?*((const uint8_t *)array+il.array_header()):0;}
+static TransferPeer *transfer_peer(uint64_t id){
+ TransferPeer *free_slot=NULL;
+ for(unsigned i=0;i<MAX_PEERS+1;i++){if(transfer_peers[i].id==id)return &transfer_peers[i];if(!transfer_peers[i].id&&!free_slot)free_slot=&transfer_peers[i];}
+ if(free_slot){free_slot->id=id;return free_slot;}
+ return NULL;
+}
+static void transfer_packet(bool incoming,uint64_t remote,int channel,unsigned kind,int bytes,bool result){
+ if(!diagnostics_enabled||channel<1||channel>2||!remote)return;
+ TransferPeer *trace=transfer_peer(remote);if(!trace)return;
+ ULONGLONG now=GetTickCount64();TransferFlow *flow=&trace->flows[incoming?1:0][channel];
+ if(!flow->active){flow->active=true;flow->started=now;flow->last_report=now;char details[96];snprintf(details,sizeof(details),"direction=%s channel=%d first_kind=0x%02x first_bytes=%d",incoming?"receive":"send",channel,kind,bytes);diagnostic_event(channel==1?"world_transfer_started":"game_transfer_started",remote,true,details);}
+ flow->packets++;if(bytes>0)flow->bytes+=(uint64_t)bytes;flow->last_packet=now;flow->last_kind=kind;flow->stall_reported=false;
+ if(!result){char details[96];snprintf(details,sizeof(details),"direction=%s channel=%d kind=0x%02x bytes=%d",incoming?"receive":"send",channel,kind,bytes);diagnostic_event("game_packet_failed",remote,true,details);}
+ if(!flow->last_report||now-flow->last_report>=2000){flow->last_report=now;char details[160];snprintf(details,sizeof(details),"direction=%s channel=%d packets=%llu bytes=%llu last_kind=0x%02x elapsed_ms=%llu",incoming?"receive":"send",channel,(unsigned long long)flow->packets,(unsigned long long)flow->bytes,kind,(unsigned long long)(now-flow->started));diagnostic_event("game_transfer_progress",remote,true,details);}
+}
+static void transfer_stall_diagnostics(ULONGLONG now){
+ if(!diagnostics_enabled)return;
+ for(unsigned i=0;i<MAX_PEERS+1;i++)if(transfer_peers[i].id)for(unsigned direction=0;direction<2;direction++)for(unsigned channel=1;channel<=2;channel++){
+  TransferFlow *flow=&transfer_peers[i].flows[direction][channel];
+  if(flow->active&&!flow->stall_reported&&now-flow->last_packet>=3000){char details[160];snprintf(details,sizeof(details),"direction=%s channel=%u packets=%llu bytes=%llu idle_ms=%llu last_kind=0x%02x",direction?"receive":"send",channel,(unsigned long long)flow->packets,(unsigned long long)flow->bytes,(unsigned long long)(now-flow->last_packet),flow->last_kind);diagnostic_event("game_transfer_idle",transfer_peers[i].id,false,details);flow->stall_reported=true;}
+ }
+}
+static void transfer_stopped(uint64_t peer_id,const char *reason){
+ TransferPeer *trace=NULL;
+ for(unsigned i=0;i<MAX_PEERS+1;i++)if(transfer_peers[i].id==peer_id){trace=&transfer_peers[i];break;}
+ if(!trace)return;
+ if(diagnostics_enabled)for(unsigned direction=0;direction<2;direction++)for(unsigned channel=1;channel<=2;channel++){
+  TransferFlow *flow=&trace->flows[direction][channel];
+  if(!flow->active)continue;
+  char details[192];
+  snprintf(details,sizeof(details),"direction=%s channel=%u packets=%llu bytes=%llu duration_ms=%llu reason=%s",direction?"receive":"send",channel,(unsigned long long)flow->packets,(unsigned long long)flow->bytes,(unsigned long long)(GetTickCount64()-flow->started),reason);
+  diagnostic_event("game_transfer_stopped",peer_id,false,details);
+ }
+ memset(trace,0,sizeof(*trace));
+}
 static void packet_log(bool incoming,uint64_t remote,int channel,unsigned kind,int bytes,bool result){
+ transfer_packet(incoming,remote,channel,kind,bytes,result);
  if(!diagnostics_enabled||channel<1||channel>2||packet_logs[incoming?1:0][channel]++>=8)return;
  char details[128];snprintf(details,sizeof(details),"direction=%s channel=%d kind=0x%02x bytes=%d result=%d",incoming?"receive":"send",channel,kind,bytes,result);diagnostic_event("game_packet",remote,true,details);
 }
@@ -613,7 +654,7 @@ static void tick_server(void){
   uint64_t id=sdk.gs_id(server_api);
   if(id&&!backend_ready){unsigned expected=token_configured?3U:4U;if(!server_identity(id)||account_type(id)!=expected){if(strcmp(net_phase,"server-id-type-mismatch")!=0){char text[128];snprintf(text,sizeof(text),"Steam returned an unexpected server identity type=%u; expected=%u",account_type(id),expected);report(text);phase("server-id-type-mismatch");}}else{server_id=id;self_id=0;backend_ready=true;if(sockets_api){int result=sdk.init_auth(sockets_api);char text[128];snprintf(text,sizeof(text),"network: InitAuthentication result=%d",result);report(text);}diagnostic_event("server_authenticated",0,false,token_configured?"login=gslt":"login=anonymous");uint8_t yes=1;void *a[]={&id};call(game.set_steam_id,NULL,a);Object *name=il.new_string(server_name);void *b[]={name};call(game.set_persona,NULL,b);void *c[]={&yes};call(game.set_initialized,NULL,c);publish_members();if(!call(game.crew_instance,NULL,NULL))call(game.crew_create,NULL,NULL);char text[128];snprintf(text,sizeof(text),"%s server SteamID: %llu",token_configured?"Persistent":"Anonymous",(unsigned long long)id);report(text);phase(token_configured?"server-authenticated-gslt":"server-authenticated-anonymous");}}
  }
- transport_diagnostic();receive_control();ULONGLONG now=GetTickCount64();
+ transport_diagnostic();receive_control();ULONGLONG now=GetTickCount64();transfer_stall_diagnostics(now);
  if(now>=next_roster){next_roster=now+5000;broadcast_roster();}
  for(unsigned i=0;i<MAX_PEERS;i++)if(peers[i].id&&now-peers[i].heard>45000)drop_peer(&peers[i],"Session timed out");
 }
@@ -639,7 +680,7 @@ static void tick_client(void){
   if(!client_auth_started)client_auth_started=now;
   send_control(server_id,AUTH_REQUEST,&auth,(uint32_t)offsetof(AuthPayload,ticket)+ticket_size);diagnostic_event("client_auth_request_sent",server_id,true,"password=redacted ticket=redacted");SecureZeroMemory(&auth,sizeof(auth));phase("client-authenticating");
  }
- transport_diagnostic();receive_control();
+ transport_diagnostic();receive_control();transfer_stall_diagnostics(GetTickCount64());
  if(client_stopped||shutdown_requested)return;
  if(client_timed_out(GetTickCount64()))return;
  if(client_connected&&now>=next_ping){next_ping=now+5000;send_control(server_id,PING,NULL,0);}
