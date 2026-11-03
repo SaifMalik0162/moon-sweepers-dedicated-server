@@ -1,14 +1,17 @@
 # Moon Sweepers native server and client module
 
 This Windows x64 `version.dll` forwards the system VERSION API and, when enabled,
-adapts the owned game to an anonymous Steam GameServer host or direct-connect
-client. It contains our adapter code and MinHook, without game binaries, accounts,
+adapts the owned game to an anonymous or GSLT-backed Steam GameServer host, or a
+direct-connect client. It contains our adapter code and MinHook, without game binaries, accounts,
 or copied game source. Runtime methods and fields are resolved through IL2CPP.
 
 Supported game: Moon Sweepers 1.0.5, Steam build 26317497, Unity 6000.6.0f1.
 The import and client installation tools reject a different GameAssembly hash.
 Both players still need their own Steam accounts and game licenses. The server
-uses Valve's anonymous GameServer login and consumes no playing account.
+defaults to Valve's anonymous GameServer login, which consumes no playing account.
+Set the optional `MOON_STEAM_TOKEN` GSLT for a persistent GameServer SteamID;
+never use a personal Steam password. Status reports `steam_login_mode` and
+`steam_account_type` so the configured identity can be checked.
 
 Build from the repository root with Linux Docker:
 
@@ -34,6 +37,19 @@ for it before requesting admission. Passwords stay out of logs and launch argume
 An empty `MOON_ALLOWED_STEAM_IDS` allows licensed players with the password; a
 nonempty value adds a player filter. Server and clients must use the same release
 (protocol v2).
+
+For troubleshooting, set `MOON_DIAGNOSTICS=1` in the server environment or add
+`-moon-diagnostics` to a client's Steam launch options. The default is off. The
+host log uses UTC timestamps with millisecond precision and correlation IDs for
+each process and connected peer. It records join stages and coarse host/world
+state changes. It does not write password values, raw Steam ticket bytes, or
+Steam's unfiltered connection debug strings. Packet diagnostics contain direction,
+channel, type, size, and result only. The 1.0.5 metadata maps the related game
+paths: `MoonCrewSession.TickRobotPoses` / `SendRobotPoses`, owned-vehicle report
+handling, and `MoonWorld.WriteCrewStations` / `ApplyCrewStations`. These names
+locate the serialization paths but do not reveal their runtime field values.
+In the dedicated roster, only authenticated client identities are marked local;
+the GameServer identity represents the host endpoint, not a player.
 
 The host defaults to save slot 1; `MOON_SLOT` or `-moon-slot` selects 1-5.
 The ordinary game save directory is retained within the persistent Wine prefix.

@@ -199,7 +199,11 @@ moon_cleanup() {
         kill -TERM "$moon_log_pid" 2>/dev/null || true
         wait "$moon_log_pid" 2>/dev/null || true
     fi
-    if [[ -n "$moon_x_pid" ]]; then kill -TERM "$moon_x_pid" 2>/dev/null || true; fi
+    if [[ -n "$moon_x_pid" ]]; then
+        kill -TERM "$moon_x_pid" 2>/dev/null || true
+        # Let Xvfb remove its socket and lock before PID 1 exits.
+        wait "$moon_x_pid" 2>/dev/null || true
+    fi
 }
 
 moon_signal_stop() {
@@ -243,13 +247,36 @@ Path("/data/game/steam_appid.txt").write_text("5335510\n", encoding="ascii")
 PY
 if [[ "$moon_mode" == install ]]; then exit 0; fi
 
-Xvfb "$DISPLAY" -screen 0 640x480x24 -nolisten tcp >/data/logs/xvfb.log 2>&1 &
-moon_x_pid=$!
-for moon_display_attempt in $(seq 1 100); do
-    if xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then break; fi
-    if ! kill -0 "$moon_x_pid" 2>/dev/null; then echo "Virtual display failed; see xvfb.log." >&2; exit 1; fi
-    sleep 0.1
-done
+# Docker restart preserves /tmp, including locks left by a forced stop. Reuse a
+# live display; remove its stale files only when no X server answers there.
+if [[ "$DISPLAY" =~ ^:([0-9]+)(\.[0-9]+)?$ ]]; then
+    moon_display_number="${BASH_REMATCH[1]}"
+fi
+if xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
+    echo "Using existing virtual display $DISPLAY."
+else
+    if [[ -n "${moon_display_number:-}" ]]; then
+        rm -f -- "/tmp/.X${moon_display_number}-lock" "/tmp/.X11-unix/X${moon_display_number}"
+    fi
+    Xvfb "$DISPLAY" -screen 0 640x480x24 -nolisten tcp >/data/logs/xvfb.log 2>&1 &
+    moon_x_pid=$!
+    moon_x_ready=0
+    for moon_display_attempt in $(seq 1 100); do
+        if xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
+            moon_x_ready=1
+            break
+        fi
+        if ! kill -0 "$moon_x_pid" 2>/dev/null; then
+            echo "Virtual display failed; see xvfb.log." >&2
+            exit 1
+        fi
+        sleep 0.1
+    done
+    if [[ "$moon_x_ready" != 1 ]]; then
+        echo "Virtual display did not become ready; see xvfb.log." >&2
+        exit 1
+    fi
+fi
 if [[ ! -f "$WINEPREFIX/system.reg" ]]; then
     timeout 90 /usr/lib/wine/wine64 wineboot.exe -u > /data/logs/wineboot.log 2>&1
 fi

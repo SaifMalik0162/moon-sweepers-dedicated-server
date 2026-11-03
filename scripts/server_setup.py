@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare explicit owned-game and player settings for the anonymous server."""
+"""Prepare explicit owned-game and player settings for the Moon Sweepers server."""
 import argparse
 import hashlib
 import os
@@ -38,6 +38,14 @@ def allowlist(value):
 def server_password(value):
     if not 8 <= len(value) <= 128 or any(not 32 <= ord(character) <= 126 for character in value):
         raise ValueError("The server password must contain 8-128 printable ASCII characters.")
+    return value
+
+
+def steam_token(value):
+    if not value:
+        return ""
+    if len(value) > 256 or any(not 33 <= ord(character) <= 126 for character in value):
+        raise ValueError("MOON_STEAM_TOKEN must be at most 256 printable non-space ASCII characters.")
     return value
 
 
@@ -83,8 +91,10 @@ def main():
     try:
         password = server_password(args.password if args.password is not None else generate_password())
         players = allowlist(args.steam_ids)
+        token = steam_token(os.environ.get("MOON_STEAM_TOKEN", ""))
         source_text = env_quote(str(source))
         password_text = env_quote(password)
+        token_text = env_quote(token)
         timezone_text = env_quote(args.timezone)
     except ValueError as error:
         parser.error(str(error))
@@ -97,10 +107,10 @@ def main():
     if output.exists() and not args.force:
         parser.error(f"{output} already exists. Edit it, or use --force to replace it.")
     settings = (
-        "# Anonymous Moon Sweepers server; no Steam account credentials.\n"
-        f"MOON_GAME_SOURCE={source_text}\nMOON_SERVER_PASSWORD={password_text}\nMOON_ALLOWED_STEAM_IDS={players}\n"
+        "# Moon Sweepers server settings. A Game Server Login Token is optional; never use a personal Steam password.\n"
+        f"MOON_GAME_SOURCE={source_text}\nMOON_IMAGE=moon-sweepers-server:local\nMOON_SERVER_PASSWORD={password_text}\nMOON_STEAM_TOKEN={token_text}\nMOON_ALLOWED_STEAM_IDS={players}\n"
         f"MOON_SLOT={args.slot}\nMOON_GAME_PORT={args.game_port}\nMOON_QUERY_PORT={args.query_port}\n"
-        f"MOON_BACKUP_KEEP={args.backup_keep}\nTZ={timezone_text}\n"
+        f"MOON_DIAGNOSTICS=0\nMOON_BACKUP_KEEP={args.backup_keep}\nTZ={timezone_text}\n"
     )
     descriptor, temporary = tempfile.mkstemp(prefix=".server-env-", dir=output.parent)
     try:
@@ -114,6 +124,7 @@ def main():
     command_prefix = "docker compose --env-file " + shlex.quote(str(output)) + " -f compose.server.yaml"
     print(f"Saved {output}.")
     print("Server password: " + password)
+    print("Steam server login: " + ("GSLT configured (token not displayed)." if token else "anonymous (server ID may change after restart)."))
     print("Player access: password plus Steam game ownership" + (" and the configured SteamID allowlist." if players else "."))
     print("Start: " + command_prefix + " up -d --build")
     print("Status: " + command_prefix + " exec -T server /opt/moon/bin/entrypoint status")

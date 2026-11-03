@@ -15,10 +15,13 @@ int MoonNet_GamePort(void);
 int MoonNet_QueryPort(void);
 unsigned MoonNet_AuthenticatedPeers(void);
 const char *MoonNet_Phase(void);
+const char *MoonNet_LoginMode(void);
+unsigned MoonNet_ServerAccountType(void);
 
 /* Keep normal Steam.Update for clients. Dedicated mode supplies its own genuine
    GameServer callback pump. Both modes need Tick on the Unity thread. */
 void MoonNet_Tick(void);
 void MoonNet_SetWorldReady(bool ready);
+void MoonNet_Diagnostic(const char *event,const char *details);
 void MoonNet_Shutdown(void);
 #endif
