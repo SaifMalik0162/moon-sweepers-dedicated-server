@@ -75,7 +75,7 @@ static void note(const char *message) {
  SYSTEMTIME t; GetSystemTime(&t);
  EnterCriticalSection(&log_lock);
  FILE *f=fopen(log_path,"a");
- if(f) {fprintf(f,"%04u-%02u-%02uT%02u:%02u:%02uZ %s\n",t.wYear,t.wMonth,t.wDay,t.wHour,t.wMinute,t.wSecond,message);fclose(f);}
+ if(f) {fprintf(f,"%04u-%02u-%02uT%02u:%02u:%02u.%03uZ %s\n",t.wYear,t.wMonth,t.wDay,t.wHour,t.wMinute,t.wSecond,t.wMilliseconds,message);fclose(f);}
  LeaveCriticalSection(&log_lock);
 }
 static void error(const char *message) {
@@ -101,7 +101,7 @@ static void write_state(State q) {
  bool ready=q.steam&&q.game&&!q.loading&&q.lobby&&q.bound&&(MoonNet_IsClient()||(q.host&&q.shift))&&!MoonNet_IsStopped()&&!stop_after_save&&!save_failed;
  fprintf(f,"{\"schema\":1,\"heartbeat_unix_ms\":%llu,\"phase\":",unix_ms);json_string(f,phase);
  fprintf(f,",\"slot\":%d,\"steam\":%s,\"menu\":%s,\"in_game\":%s,\"loading\":%s,\"in_lobby\":%s,\"is_host\":%s,\"shift_started\":%s,\"world_bound\":%s,\"ready\":%s,\"error\":",host_slot,q.steam?"true":"false",q.menu?"true":"false",q.game?"true":"false",q.loading?"true":"false",q.lobby?"true":"false",q.host?"true":"false",q.shift?"true":"false",q.bound?"true":"false",ready?"true":"false");
- json_string(f,last_error);fprintf(f,",\"save_pending\":%s,\"save_failed\":%s,\"dedicated\":%s,\"client\":%s,\"server_steam_id\":\"%llu\",\"authenticated_players\":%u,\"join_transport\":\"steam\",\"network_phase\":",save_task?"true":"false",save_failed?"true":"false",MoonNet_IsDedicated()?"true":"false",MoonNet_IsClient()?"true":"false",(unsigned long long)MoonNet_ServerId(),MoonNet_AuthenticatedPeers());json_string(f,MoonNet_Phase());if(MoonNet_IsDedicated())fprintf(f,",\"game_port\":%d,\"query_port\":%d",MoonNet_GamePort(),MoonNet_QueryPort());fputs("}\n",f);fclose(f);
+ json_string(f,last_error);fprintf(f,",\"save_pending\":%s,\"save_failed\":%s,\"dedicated\":%s,\"client\":%s,\"server_steam_id\":\"%llu\",\"authenticated_players\":%u,\"join_transport\":\"steam\",\"network_phase\":",save_task?"true":"false",save_failed?"true":"false",MoonNet_IsDedicated()?"true":"false",MoonNet_IsClient()?"true":"false",(unsigned long long)MoonNet_ServerId(),MoonNet_AuthenticatedPeers());json_string(f,MoonNet_Phase());if(MoonNet_IsDedicated()){fprintf(f,",\"game_port\":%d,\"query_port\":%d,\"steam_account_type\":%u,\"steam_login_mode\":",MoonNet_GamePort(),MoonNet_QueryPort(),MoonNet_ServerAccountType());json_string(f,MoonNet_LoginMode());}fputs("}\n",f);fclose(f);
  MoveFileExA(temp,state_path,MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH);
 }
 static void env_text(const char *name,char *target,size_t capacity) {
@@ -198,7 +198,14 @@ static State read_state(bool *ok) {
  if(q.game&&methods.crew_instance&&methods.crew_bound_field){Object *crew=call(methods.crew_instance,NULL,NULL,ok);Object *world=NULL;if(crew)api.field_get_value(crew,methods.crew_bound_field,&world);q.bound=world&&initialized_world&&api.gchandle_get_target(initialized_world)==world;}
  return q;
 }
-static void transition(const char *next) {if(strcmp(phase,next)!=0){phase=next;note(next);}}
+static void diagnostic_game_state(State q) {
+ static State previous;static bool recorded;
+ if(recorded&&previous.steam==q.steam&&previous.menu==q.menu&&previous.game==q.game&&previous.loading==q.loading&&previous.lobby==q.lobby&&previous.host==q.host&&previous.busy==q.busy&&previous.shift==q.shift&&previous.bound==q.bound)return;
+ previous=q;recorded=true;
+ char details[160];snprintf(details,sizeof(details),"steam=%d menu=%d game=%d loading=%d lobby=%d host=%d busy=%d shift=%d world_bound=%d",q.steam,q.menu,q.game,q.loading,q.lobby,q.host,q.busy,q.shift,q.bound);
+ MoonNet_Diagnostic("game_state",details);
+}
+static void transition(const char *next) {if(strcmp(phase,next)!=0){phase=next;note(next);MoonNet_Diagnostic("host_phase",next);}}
 static void request_quit(void) {
  if(quit_requested)return;
  quit_requested=true;transition(save_failed?"stopped-save-failed":"stopped");
@@ -233,7 +240,7 @@ static bool control_tick(State q,ULONGLONG now) {
   bool done=task&&task_flag(task,"get_IsCompleted",&ok);
   if(done||!ok||now>=save_deadline){
    if(!done||!ok||task_flag(task,"get_IsFaulted",&ok)||task_flag(task,"get_IsCanceled",&ok)||!ok){save_failed=true;error("World save failed, was canceled, or exceeded 90 seconds");}
-   else {last_error[0]=0;note("World save completed successfully");}
+   else {last_error[0]=0;note("World save completed successfully");MoonNet_Diagnostic("world_save_completed","success=1");}
    api.gchandle_free(save_task);save_task=0;
   }
  }
@@ -247,7 +254,7 @@ static void host_tick(void) {
  ULONGLONG now=GetTickCount64();if(now<next_tick)return;next_tick=now+250;
  if(InterlockedCompareExchange(&tick_busy,1,0)!=0)return;
  if(headless)moon_headless_frame_limit();
- bool ok=true;State q=read_state(&ok);
+ bool ok=true;State q=read_state(&ok);diagnostic_game_state(q);
  MoonNet_SetWorldReady(ok&&q.game&&!q.loading&&q.bound);
  if(control_tick(q,now)){InterlockedExchange(&tick_busy,0);return;}
  if(!ok){transition("managed-error");write_state(q);InterlockedExchange(&tick_busy,0);return;}
@@ -282,7 +289,7 @@ static void __cdecl world_initialize_hook(Object *self,const Method *info) {
  Object *progress=NULL,*regions=NULL;
  api.field_get_value(self,methods.world_progress_field,&progress);api.field_get_value(self,methods.world_regions_field,&regions);
  if(progress&&regions&&api.array_length(regions)>0){
-  if(!initialized_world||api.gchandle_get_target(initialized_world)!=self){if(initialized_world)api.gchandle_free(initialized_world);initialized_world=api.gchandle_new(self,false);note("CPU world initialization completed");}
+  if(!initialized_world||api.gchandle_get_target(initialized_world)!=self){if(initialized_world)api.gchandle_free(initialized_world);initialized_world=api.gchandle_new(self,false);note("CPU world initialization completed");char details[96];snprintf(details,sizeof(details),"progress_store=1 region_count=%llu",(unsigned long long)api.array_length(regions));MoonNet_Diagnostic("world_initialized",details);}
  }
 }
 static bool __cdecl signed_hook(int slot,const Method *info) {return slot==host_slot?true:original_signed(slot,info);}

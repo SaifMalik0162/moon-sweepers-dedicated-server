@@ -47,5 +47,5 @@ RUN cd /native && x86_64-w64-mingw32-gcc -shared -O2 -Wall -Wextra -Werror \
 FROM server-runtime AS server
 COPY --from=native-build /out/version.dll /opt/moon/mod/version.dll
 COPY --from=native-build /out/MinHook-LICENSE.txt /opt/moon/mod/MinHook-LICENSE.txt
-LABEL org.opencontainers.image.title="Moon Sweepers anonymous server prototype" \
-      org.opencontainers.image.description="Wine/Unity CPU-only server runtime using the genuine Steam GameServer API"
+LABEL org.opencontainers.image.title="Moon Sweepers dedicated server" \
+      org.opencontainers.image.description="Unofficial Wine/Unity CPU-only server runtime using the Steam GameServer API"

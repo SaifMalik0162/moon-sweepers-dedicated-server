@@ -1,5 +1,7 @@
 .env
-.server.env
+.server.env*
+!.server.env.example
+*.env
 .secrets/
 __pycache__/
 *.pyc

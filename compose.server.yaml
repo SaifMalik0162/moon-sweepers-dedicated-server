@@ -5,7 +5,7 @@ services:
       context: .
       dockerfile: Dockerfile.server
       target: server
-    image: moon-sweepers-server:local
+    image: "${MOON_IMAGE:-moon-sweepers-server:local}"
     platform: linux/amd64
     restart: unless-stopped
     # Native saving can wait 90s; allow time for the 110s runner deadline and backup.
@@ -16,7 +16,9 @@ services:
       MOON_GAME_PORT: "${MOON_GAME_PORT:-27025}"
       MOON_QUERY_PORT: "${MOON_QUERY_PORT:-27026}"
       MOON_SERVER_PASSWORD: "${MOON_SERVER_PASSWORD:?Set a server password in .server.env}"
+      MOON_STEAM_TOKEN: "${MOON_STEAM_TOKEN:-}"
       MOON_ALLOWED_STEAM_IDS: "${MOON_ALLOWED_STEAM_IDS:-}"
+      MOON_DIAGNOSTICS: "${MOON_DIAGNOSTICS:-0}"
       MOON_BACKUP_KEEP: "${MOON_BACKUP_KEEP:-10}"
     volumes:
       - server-data:/data

@@ -1,43 +1,44 @@
 # Moon Sweepers dedicated server for Ubuntu
 
-An unofficial Docker server for Ubuntu on Intel/AMD. The host runs without a GPU,
-uses a genuine anonymous Steam GameServer identity, and keeps the world in a
-persistent volume. You and your friend use your two existing licensed Steam
-accounts. A third playing account and a Steam desktop on the server are unnecessary.
+An unofficial Docker server for Ubuntu on Intel/AMD. The host runs without a GPU
+and keeps the world in a persistent volume. It defaults to anonymous Steam
+GameServer login, or can use an optional Game Server Login Token (GSLT) for a
+persistent server ID. A third playing account and a Steam desktop on the server
+are unnecessary.
 
 **Supported game:** Moon Sweepers 1.0.5, Steam build 26317497. All playing PCs need
 this release's small client module. The installers check the game build and refuse
 to overwrite a different mod's `version.dll`.
 
-**Tested:** a real licensed Steam client joined the CPU-only Ubuntu container,
-loaded its world, moved, and swept dust. The server saved the changed terrain.
-Fresh installation, clean Docker shutdown, automatic backup, and restoration after
-restart also passed. Password checks pass automated tests; the new password prompt
-still needs a live client connection test. Two simultaneous playing clients have
-not yet been tested. This is an unofficial experimental adapter.
+**Earlier upstream baseline:** a licensed Steam client joined the CPU-only Ubuntu
+container, loaded its world, moved, and swept dust. The server saved the changed
+terrain. Those observations predate the current fork changes; they do not cover
+the GSLT login, Steam ticket retry, or gameplay sync changes in this branch. This
+remains an unofficial experimental adapter.
 
 ## Install on Ubuntu
 
-Copy this project and your owned Windows game folder to your server. Then, from
-the project directory:
+Use a checkout of this fork, not the upstream `v0.1.0-alpha.2` release ZIP: that
+release does not contain the fixes in this branch. Copy the fork and your owned
+Windows game folder to your server. Then, from the project directory:
 
 ```sh
-git clone https://github.com/hexonMD/moon-sweepers-dedicated-server.git
-cd moon-sweepers-dedicated-server
 python3 scripts/server_setup.py
 docker compose --env-file .server.env -f compose.server.yaml up -d --build
 docker compose --env-file .server.env -f compose.server.yaml exec -T server /opt/moon/bin/entrypoint status
 ```
 
 Setup asks for the game folder, generates a join password, and prints it plainly.
-Status prints the current anonymous `server_steam_id`. Read the complete [Ubuntu installation guide](SERVER.md)
+Status prints the server `server_steam_id`; with a GSLT, the ID persists across
+restarts. Read the complete [Ubuntu installation guide](SERVER.md)
 for the Windows-to-Ubuntu copy command, settings, backups, and troubleshooting.
 
-No Steam username or password is used. The image contains Wine and our module;
+No personal Steam username or password is used. The image contains Wine and our module;
 it imports your game files from a read-only mount and downloads only Valve's
 official server redistributables anonymously. Steam tickets and game ownership are
 checked before a player can join. Any licensed player with the join password can
-connect. An optional SteamID allowlist can restrict access further.
+connect. An optional SteamID allowlist can restrict access further. A GSLT is
+optional and is stored in the private server environment file.
 
 Set the password with Docker's `MOON_SERVER_PASSWORD` environment variable (8-128
 printable ASCII characters). Compose reads it from `.server.env`:
