@@ -509,11 +509,15 @@ static void packet_log(bool incoming,uint64_t remote,int channel,unsigned kind,i
 static bool __cdecl send_bytes(Object *self,uint64_t to,Object *data,int bytes,int channel,bool reliable,const Method *info){
  unsigned kind=packet_kind(data);bool result=real_send_bytes(self,to,data,bytes,channel,reliable,info);packet_log(false,to,channel,kind,bytes,result);return result;
 }
+static void note_game_activity(uint64_t from){
+ Peer *p=peer(from,false);
+ if(p&&p->authenticated)p->heard=GetTickCount64();
+}
 static void __cdecl receive_transfer(Object *self,uint64_t from,Object *data,const Method *info){
- packet_log(true,from,2,packet_kind(data),data?(int)il.array_length(data):0,true);real_receive_transfer(self,from,data,info);
+ note_game_activity(from);packet_log(true,from,2,packet_kind(data),data?(int)il.array_length(data):0,true);real_receive_transfer(self,from,data,info);
 }
 static void __cdecl receive_world(Object *self,uint64_t from,Object *data,const Method *info){
- packet_log(true,from,1,packet_kind(data),data?(int)il.array_length(data):0,true);real_receive_world(self,from,data,info);
+ note_game_activity(from);packet_log(true,from,1,packet_kind(data),data?(int)il.array_length(data):0,true);real_receive_world(self,from,data,info);
 }
 static void __cdecl steam_destroy(Object *self,const Method *info){MoonNet_Shutdown();uint8_t no=0;void *args[]={&no};call(game.set_initialized,NULL,args);real_steam_destroy(self,info);}
 
