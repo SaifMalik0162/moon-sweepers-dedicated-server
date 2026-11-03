@@ -47,6 +47,8 @@ typedef struct {uint32_t bytes;uint16_t password_length;char name[64];uint8_t pa
 typedef const void Method;
 typedef void Object;
 static int mode,game_port=27025,query_port=27026;
+static unsigned server_slot=1;
+static char crew_world_root[64]="moon-sweepers-slot-1";
 static bool ports_valid=true;
 static bool diagnostics_enabled;
 static DWORD diagnostics_pid,diagnostics_tick;
@@ -142,15 +144,17 @@ static void (__cdecl *real_receive_transfer)(Object *,uint64_t,Object *,const Me
 static void (__cdecl *real_receive_world)(Object *,uint64_t,Object *,const Method *);
 static unsigned packet_logs[2][3];
 static struct {
- void *lobby_class,*member_class,*crew_class,*join_class;
+ void *lobby_class,*member_class,*crew_class,*join_class,*crew_identity_class;
  void *list_field,*member_id,*member_name,*member_look,*member_ready,*member_host,*member_local;
  const Method *steam_initialized,*set_initialized,*set_steam_id,*set_persona,*crew_create,*crew_instance;
+ const Method *crew_world_join,*crew_world_leave,*crew_world_joined,*crew_world_host_id;
  const Method *session_start,*in_menu,*newhire_active,*begin_join,*join_ctor,*persona;
  Object *member_list;const Method *list_clear,*list_add;
 } game;
 
 static void report(const char *text){if(logger)logger(text);}
 static void diagnostic_event(const char *event,uint64_t peer_id,bool create_peer,const char *details);
+static bool ensure_dedicated_crew_world(void);
 static void phase(const char *text){if(strcmp(net_phase,text)!=0){net_phase=text;report(text);diagnostic_event("network_phase",0,false,text);}}
 static void env(const char *key,char *out,size_t size){DWORD n=GetEnvironmentVariableA(key,out,(DWORD)size);if(!n||n>=size)out[0]=0;}
 static unsigned peer_correlation(uint64_t id,bool create){
@@ -193,6 +197,16 @@ static bool parse_port(const char *value,int *output){
  if(parsed<1024)return false;
  *output=(int)parsed;return true;
 }
+static bool parse_slot(const char *text,unsigned *output){
+ if(!text||!*text)return false;
+ unsigned parsed=0;
+ for(const char *p=text;*p;p++){
+  if(*p<'0'||*p>'9')return false;
+  parsed=parsed*10+(*p-'0');if(parsed>5)return false;
+ }
+ if(parsed<1)return false;
+ *output=parsed;return true;
+}
 static void configure(void){
  if(configured)return;
  configured=true;
@@ -202,6 +216,7 @@ static void configure(void){
  env("MOON_CONNECT",value,sizeof(value));if(*value){server_id=parse_id(value);mode=MODE_CLIENT;}
  env("MOON_GAME_PORT",value,sizeof(value));if(*value&&!parse_port(value,&game_port))ports_valid=false;
  env("MOON_QUERY_PORT",value,sizeof(value));if(*value&&!parse_port(value,&query_port))ports_valid=false;
+ env("MOON_SLOT",value,sizeof(value));if(*value)parse_slot(value,&server_slot);
  env("MOON_SERVER_NAME",value,sizeof(value));if(*value)snprintf(server_name,sizeof(server_name),"%.63s",value);
  value[0]=0;SetLastError(ERROR_SUCCESS);DWORD configured_ids=GetEnvironmentVariableA("MOON_ALLOWED_STEAM_IDS",value,sizeof(value));
  allowlist_set=configured_ids>0||GetLastError()!=ERROR_ENVVAR_NOT_FOUND;
@@ -219,8 +234,10 @@ static void configure(void){
  if(argv){for(int i=1;i<argc;i++){
   if(wcscmp(argv[i],L"-moon-diagnostics")==0)diagnostics_enabled=true;
   else if(wcscmp(argv[i],L"-moon-dedicated")==0)mode=MODE_SERVER;
+  else if(wcscmp(argv[i],L"-moon-slot")==0&&i+1<argc){char text[16]={0};WideCharToMultiByte(CP_UTF8,0,argv[++i],-1,text,sizeof(text),NULL,NULL);parse_slot(text,&server_slot);}
   else if(wcscmp(argv[i],L"-moon-connect")==0&&i+1<argc){char text[64];WideCharToMultiByte(CP_UTF8,0,argv[++i],-1,text,sizeof(text),NULL,NULL);server_id=parse_id(text);mode=MODE_CLIENT;}
  }LocalFree(argv);}
+ snprintf(crew_world_root,sizeof(crew_world_root),"moon-sweepers-slot-%u",server_slot);
  if(diagnostics_enabled&&!diagnostics_pid){diagnostics_pid=GetCurrentProcessId();diagnostics_tick=(DWORD)GetTickCount64();}
  if(mode==MODE_SERVER){
   wchar_t wide[MAX_PASSWORD+2]={0};DWORD n=GetEnvironmentVariableW(L"MOON_SERVER_PASSWORD",wide,MAX_PASSWORD+2);
@@ -246,7 +263,10 @@ const char *MoonNet_Phase(void){return net_phase;}
 const char *MoonNet_LoginMode(void){configure();return token_configured?"gslt":"anonymous";}
 unsigned MoonNet_ServerAccountType(void){return account_type(server_id);}
 unsigned MoonNet_AuthenticatedPeers(void){unsigned n=0;for(unsigned i=0;i<MAX_PEERS;i++)if(peers[i].id&&peers[i].authenticated)n++;return n;}
-void MoonNet_SetWorldReady(bool ready){if(world_ready!=ready){world_ready=ready;diagnostic_event("network_world_ready",0,false,ready?"ready=1":"ready=0");}}
+void MoonNet_SetWorldReady(bool ready){
+ if(ready&&mode==MODE_SERVER&&!ensure_dedicated_crew_world())ready=false;
+ if(world_ready!=ready){world_ready=ready;diagnostic_event("network_world_ready",0,false,ready?"ready=1":"ready=0");}
+}
 void MoonNet_Diagnostic(const char *event,const char *details){if(event&&*event)diagnostic_event(event,0,false,details);}
 static NetIdentity identity(uint64_t id){NetIdentity value={0};value.kind=16;value.bytes=8;value.data.steam_id=id;return value;}
 static uint64_t identity_id(const NetIdentity *id){return id&&id->kind==16&&id->bytes==8?id->data.steam_id:0;}
@@ -263,6 +283,16 @@ static void *klass(const char *name){return il.klass(game_image,"MoonCleaners",n
 static const Method *method(void *k,const char *name,int count){return k?il.method(k,name,count):NULL;}
 static Object *call(const Method *m,Object *self,void **args){if(!m){report("network: required managed method missing");return NULL;}Object *exception=NULL;Object *out=il.invoke(m,self,args,&exception);if(exception){char text[768]={0};il.exception(exception,text,sizeof(text));report(text);}return out;}
 static bool boolean(const Method *m){Object *v=call(m,NULL,NULL);return v&&*(uint8_t *)il.unbox(v)!=0;}
+static uint64_t unsigned_integer(const Method *m){Object *v=call(m,NULL,NULL);return v?*(uint64_t *)il.unbox(v):0;}
+static bool ensure_dedicated_crew_world(void){
+ if(mode!=MODE_SERVER||!backend_ready||!server_id)return false;
+ if(boolean(game.crew_world_joined)&&unsigned_integer(game.crew_world_host_id)==server_id)return true;
+ Object *root=il.new_string(crew_world_root);if(!root){report("network: could not allocate the dedicated crew world root");return false;}
+ void *args[]={root,&server_id};call(game.crew_world_join,NULL,args);
+ if(!boolean(game.crew_world_joined)||unsigned_integer(game.crew_world_host_id)!=server_id){report("network: game did not accept the dedicated crew world identity");return false;}
+ char details[80];snprintf(details,sizeof(details),"slot=%u root=%s",server_slot,crew_world_root);diagnostic_event("crew_world_joined",0,false,details);
+ return true;
+}
 static void static_value(const char *name,void *value){if(!game.lobby_class||!il.field)return;void *f=il.field(game.lobby_class,name);if(f)il.static_set(f,value);}
 static void set_bool(const char *name,bool value){uint8_t b=value;static_value(name,&b);}
 static void set_u64(const char *name,uint64_t value){static_value(name,&value);}
@@ -514,9 +544,9 @@ static bool resolve_game(void){
  /* class_from_name uses the metadata's nested-name spelling inconsistently;
     enumerate nested types through the public runtime API if necessary. */
  if(!game.member_class){void *(__cdecl *nested)(void *,void **)=NULL;const char *(__cdecl *name)(void *)=NULL;FARPROC p=GetProcAddress(game_module,"il2cpp_class_get_nested_types");memcpy(&nested,&p,sizeof(p));p=GetProcAddress(game_module,"il2cpp_class_get_name");memcpy(&name,&p,sizeof(p));if(!nested||!name)return false;void *it=NULL,*k;while((k=nested(game.lobby_class,&it))!=NULL)if(strcmp(name(k),"Member")==0){game.member_class=k;break;}}
- game.crew_class=klass("MoonCrewSession");
+ game.crew_class=klass("MoonCrewSession");game.crew_identity_class=klass("MoonCrew");
  {void *(__cdecl *nested)(void *,void **)=NULL;const char *(__cdecl *name)(void *)=NULL;FARPROC p=GetProcAddress(game_module,"il2cpp_class_get_nested_types");memcpy(&nested,&p,sizeof(p));p=GetProcAddress(game_module,"il2cpp_class_get_name");memcpy(&name,&p,sizeof(p));if(!nested||!name)return false;void *it=NULL,*k;while((k=nested(game.crew_class,&it))!=NULL)if(strcmp(name(k),"CrewJoin")==0){game.join_class=k;break;}}
- if(!game.lobby_class||!game.member_class||!game.crew_class||!game.join_class)return false;
+ if(!game.lobby_class||!game.member_class||!game.crew_class||!game.join_class||!game.crew_identity_class)return false;
  il.class_init(game.lobby_class);game.list_field=il.field(game.lobby_class,"members");if(!game.list_field)return false;il.static_get(game.list_field,&game.member_list);if(!game.member_list)return false;
  void *list_class=il.object_class(game.member_list);game.list_clear=method(list_class,"Clear",0);game.list_add=method(list_class,"Add",1);
 #define FIELD(member,name) do{game.member=il.field(game.member_class,name);if(!game.member)return false;}while(0)
@@ -525,6 +555,7 @@ static bool resolve_game(void){
  void *steam=klass("MoonSteam"),*session=klass("MoonSession");
 #define METHOD(member,k,name,n) do{game.member=method(k,name,n);if(!game.member){report("Missing game method " name);return false;}}while(0)
  METHOD(steam_initialized,steam,"get_Initialized",0);METHOD(set_initialized,steam,"set_Initialized",1);METHOD(set_steam_id,steam,"set_SteamId",1);METHOD(set_persona,steam,"set_PersonaName",1);METHOD(persona,steam,"get_PersonaName",0);METHOD(crew_create,game.crew_class,"Create",0);METHOD(crew_instance,game.crew_class,"get_Instance",0);METHOD(session_start,session,"StartShift",0);METHOD(in_menu,session,"get_InMenu",0);METHOD(newhire_active,klass("MoonNewHire"),"get_Active",0);METHOD(begin_join,game.crew_class,"BeginJoin",1);METHOD(join_ctor,game.join_class,".ctor",3);
+ METHOD(crew_world_join,game.crew_identity_class,"Join",2);METHOD(crew_world_leave,game.crew_identity_class,"Leave",0);METHOD(crew_world_joined,game.crew_identity_class,"get_Joined",0);METHOD(crew_world_host_id,game.crew_identity_class,"get_HostId",0);
 #undef METHOD
  return game.list_clear&&game.list_add;
 }
@@ -606,6 +637,7 @@ static void tick_client(void){
 void MoonNet_Tick(void){if(!installed||shutdown_requested)return;if(mode==MODE_SERVER)tick_server();else if(mode==MODE_CLIENT)tick_client();}
 void MoonNet_Shutdown(void){
  shutdown_requested=true;
+ if(mode==MODE_SERVER&&game.crew_world_joined&&boolean(game.crew_world_joined)&&unsigned_integer(game.crew_world_host_id)==server_id)call(game.crew_world_leave,NULL,NULL);
  if(mode==MODE_SERVER&&server_started){for(unsigned i=0;i<MAX_PEERS;i++)if(peers[i].id)sdk.end_auth(server_api,peers[i].id);sdk.shutdown();server_started=false;backend_ready=false;}
  else if(mode==MODE_CLIENT&&user_api){if(client_connected)send_control(server_id,GOODBYE,NULL,0);if(client_ticket)sdk.cancel_ticket(user_api,client_ticket);client_ticket=0;client_connected=false;}
  backend_ready=false;world_ready=false;
