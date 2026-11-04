@@ -59,6 +59,10 @@ owned-vehicle, and station synchronization; the synthetic lobby alone does not
 enable those paths. The root is based on the save slot, not the SteamID, so an
 anonymous server identity changing after restart does not change the world key.
 The adapter leaves this state during shutdown.
+For late joins, the dedicated host handles `WorldRequest` from this bound world
+and seeds the game's normal `SendWorld` iterator directly. This preserves the
+game's save, packing, chunk transfer, and backpressure behavior without needing
+a local `MoonWalker` on the headless host.
 The ordinary game save directory is retained within the persistent Wine prefix.
 The module reports a world ready only after CPU initialization has completed and
 the crew session is bound to that same world.

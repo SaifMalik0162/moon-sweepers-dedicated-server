@@ -36,6 +36,8 @@ _Static_assert(sizeof(AuthenticationStatus)==260&&sizeof(RelayStatus)==272,"Stea
 
 enum {MODE_OFF,MODE_SERVER,MODE_CLIENT};
 enum {CONTROL_CHANNEL=3,CONTROL_VERSION=2,MAX_PEERS=15,MAX_TICKET=2048,MAX_PASSWORD=128,MAX_LOGIN_TOKEN=256,CONTROL_MAGIC=0x5344534d};
+/* Moon Sweepers 1.0.5 MoonCrewSession.Kind values used for initial snapshots. */
+enum {WORLD_REQUEST_KIND=20,WORLD_UNAVAILABLE_KIND=22,WORLD_OFFER_KIND=25,GAME_TRANSFER_CHANNEL=2};
 enum {AUTH_REQUEST=1,ROSTER=2,REJECT=3,PING=4,GOODBYE=5,WAIT_WORLD=6,PASSWORD_REJECTED=7,AUTH_RETRY=8};
 #pragma pack(push,1)
 typedef struct {uint32_t magic;uint16_t version,type;uint32_t bytes;} ControlHeader;
@@ -65,7 +67,7 @@ static ULONGLONG client_last_heard,client_auth_started,next_server_start,next_ba
 static const char *net_phase="off";
 static void (*logger)(const char *);
 static HMODULE game_module,steam_module;
-static const void *game_image,*steam_image;
+static const void *game_image,*steam_image,*core_image;
 static void *server_api,*messages_api,*user_api;
 static int32_t server_pipe;
 static char server_name[64]="Moon Sweepers Dedicated";
@@ -148,10 +150,11 @@ static void (__cdecl *real_receive_world)(Object *,uint64_t,Object *,const Metho
 static unsigned packet_logs[2][3];
 static struct {
  void *lobby_class,*member_class,*crew_class,*join_class,*crew_identity_class;
- void *list_field,*member_id,*member_name,*member_look,*member_ready,*member_host,*member_local;
+ void *world_class,*list_field,*bound_field,*sending_field,*counted_field,*radio_counted_field,*member_id,*member_name,*member_look,*member_ready,*member_host,*member_local;
  const Method *steam_initialized,*set_initialized,*set_steam_id,*set_persona,*crew_create,*crew_instance;
- const Method *crew_world_join,*crew_world_leave,*crew_world_joined,*crew_world_host_id;
+ const Method *crew_world_join,*crew_world_leave,*crew_world_joined,*crew_world_host_id,*player_id;
  const Method *session_start,*in_menu,*newhire_active,*begin_join,*join_ctor,*persona;
+ const Method *send_world,*assign_id_block,*start_coroutine,*world_save_progress,*world_has_signed_contract,*world_terrain,*world_save_directory;
  Object *member_list;const Method *list_clear,*list_add;
 } game;
 
@@ -554,8 +557,74 @@ static void note_game_activity(uint64_t from){
  Peer *p=peer(from,false);
  if(p&&p->authenticated)p->heard=GetTickCount64();
 }
+static void dedicated_world_unavailable(uint64_t to,const char *reason){
+ uint8_t unavailable=WORLD_UNAVAILABLE_KIND;NetIdentity remote=identity(to);int result=messages_api?sdk.send(messages_api,&remote,&unavailable,1,0x28,GAME_TRANSFER_CHANNEL):3;
+ packet_log(false,to,GAME_TRANSFER_CHANNEL,unavailable,1,result==1);
+ char details[96];snprintf(details,sizeof(details),"reason=%s result=%d",reason,result);diagnostic_event("dedicated_world_stream_unavailable",to,true,details);
+}
+static void dedicated_world_stop_sending(Object *self,uint64_t to){
+ Object *set=NULL;il.field_get(self,game.sending_field,&set);if(!set)return;
+ const Method *remove=method(il.object_class(set),"Remove",1);void *args[]={&to};if(remove)call(remove,set,args);
+}
+static void dedicated_world_remove_counter(Object *self,void *field,uint64_t to){
+ Object *dictionary=NULL;il.field_get(self,field,&dictionary);if(!dictionary)return;
+ const Method *remove=method(il.object_class(dictionary),"Remove",1);void *args[]={&to};if(remove)call(remove,dictionary,args);
+}
+static void dedicated_world_request(Object *self,uint64_t to){
+ Peer *authenticated=peer(to,false);
+ if(!authenticated||!authenticated->authenticated){diagnostic_event("dedicated_world_request_rejected",to,false,"reason=peer_not_authenticated");return;}
+ Object *sending=NULL;il.field_get(self,game.sending_field,&sending);
+ if(!sending){diagnostic_event("dedicated_world_request_rejected",to,false,"reason=sending_set_missing");return;}
+ const Method *add=method(il.object_class(sending),"Add",1);void *peer_args[]={&to};Object *added=add?call(add,sending,peer_args):NULL;
+ void *added_value=added?il.unbox(added):NULL;
+ if(!added_value){dedicated_world_unavailable(to,"sending_set_add_failed");diagnostic_event("dedicated_world_request_rejected",to,true,"reason=sending_set_add_failed");return;}
+ if(!*(uint8_t *)added_value){diagnostic_event("dedicated_world_request_duplicate",to,false,"transfer=already_active");return;}
+ dedicated_world_remove_counter(self,game.counted_field,to);
+ dedicated_world_remove_counter(self,game.radio_counted_field,to);
+
+ Object *world=NULL;il.field_get(self,game.bound_field,&world);
+ if(!world){dedicated_world_unavailable(to,"bound_world_missing");dedicated_world_stop_sending(self,to);return;}
+ Object *terrain=call(game.world_terrain,world,NULL),*directory=call(game.world_save_directory,world,NULL);
+ if(!terrain||!directory||il.string_length(directory)<1){dedicated_world_unavailable(to,"world_not_saved_or_initialized");dedicated_world_stop_sending(self,to);return;}
+
+ void *player_args[]={&to};Object *player=call(game.player_id,NULL,player_args);
+ if(!player){dedicated_world_unavailable(to,"player_id_unavailable");dedicated_world_stop_sending(self,to);return;}
+ void *contract_args[]={player};Object *signed_box=call(game.world_has_signed_contract,world,contract_args);
+ void *signed_value=signed_box?il.unbox(signed_box):NULL;
+ if(!signed_value){dedicated_world_unavailable(to,"contract_lookup_failed");dedicated_world_stop_sending(self,to);return;}
+ bool signed_contract=*(uint8_t *)signed_value!=0;
+ void *id_args[]={world,&to};Object *id_box=call(game.assign_id_block,self,id_args);
+ void *id_value=id_box?il.unbox(id_box):NULL;
+ if(!id_value){dedicated_world_unavailable(to,"player_id_block_failed");dedicated_world_stop_sending(self,to);return;}
+ int32_t id_block=*(int32_t *)id_value;
+ void *send_world_args[]={&to};Object *iterator=call(game.send_world,self,send_world_args);
+ if(!iterator){dedicated_world_unavailable(to,"game_iterator_creation_failed");dedicated_world_stop_sending(self,to);return;}
+ void *iterator_class=il.object_class(iterator);
+ void *state_field=iterator_class?il.field(iterator_class,"<>1__state"):NULL;
+ void *world_field=iterator_class?il.field(iterator_class,"<world>5__2"):NULL;
+ void *signed_field=iterator_class?il.field(iterator_class,"<signed>5__3"):NULL;
+ void *save_field=iterator_class?il.field(iterator_class,"<save>5__4"):NULL;
+ if(!state_field||!world_field||!signed_field||!save_field){dedicated_world_unavailable(to,"game_iterator_fields_missing");dedicated_world_stop_sending(self,to);return;}
+
+ uint8_t offer[6]={WORLD_OFFER_KIND,(uint8_t)(signed_contract?1:0)};memcpy(offer+2,&id_block,sizeof(id_block));
+ NetIdentity remote=identity(to);int result=messages_api?sdk.send(messages_api,&remote,offer,sizeof(offer),0x28,GAME_TRANSFER_CHANNEL):3;
+ packet_log(false,to,GAME_TRANSFER_CHANNEL,offer[0],sizeof(offer),result==1);
+ if(result!=1){char details[64];snprintf(details,sizeof(details),"world_offer_result=%d",result);diagnostic_event("dedicated_world_offer_failed",to,true,details);dedicated_world_stop_sending(self,to);return;}
+ Object *task=call(game.world_save_progress,world,NULL);
+ if(!task){dedicated_world_unavailable(to,"world_save_failed");dedicated_world_stop_sending(self,to);return;}
+ int32_t resume_after_save=1;il.field_set(iterator,state_field,&resume_after_save);
+ il.field_set(iterator,world_field,world);il.field_set(iterator,signed_field,&signed_contract);il.field_set(iterator,save_field,task);
+ void *coroutine_args[]={iterator};Object *coroutine=call(game.start_coroutine,self,coroutine_args);
+ if(!coroutine){dedicated_world_unavailable(to,"game_coroutine_start_failed");diagnostic_event("dedicated_world_coroutine_failed",to,true,"start_coroutine=failed");dedicated_world_stop_sending(self,to);return;}
+ diagnostic_event("dedicated_world_stream_started",to,true,"source=bound_world save=queued");
+}
 static void __cdecl receive_transfer(Object *self,uint64_t from,Object *data,const Method *info){
- note_game_activity(from);packet_log(true,from,2,packet_kind(data),data?(int)il.array_length(data):0,true);real_receive_transfer(self,from,data,info);
+ unsigned kind=packet_kind(data);note_game_activity(from);packet_log(true,from,2,kind,data?(int)il.array_length(data):0,true);
+ /* The stock handler skips WorldRequest when the dedicated host is already
+    joined to its bound world. Keep that state for sync and start its snapshot
+    iterator here with the bound world instead of requiring a local player. */
+ if(mode==MODE_SERVER&&kind==WORLD_REQUEST_KIND){diagnostic_event("dedicated_world_request_received",from,true,"source=bound_world");dedicated_world_request(self,from);return;}
+ real_receive_transfer(self,from,data,info);
 }
 static void __cdecl receive_world(Object *self,uint64_t from,Object *data,const Method *info){
  note_game_activity(from);packet_log(true,from,1,packet_kind(data),data?(int)il.array_length(data):0,true);real_receive_world(self,from,data,info);
@@ -588,17 +657,19 @@ static bool load_apis(void){
  SDK(send,"SteamAPI_ISteamNetworkingMessages_SendMessageToUser");SDK(receive,"SteamAPI_ISteamNetworkingMessages_ReceiveMessagesOnChannel");SDK(accept,"SteamAPI_ISteamNetworkingMessages_AcceptSessionWithUser");SDK(close,"SteamAPI_ISteamNetworkingMessages_CloseSessionWithUser");SDK(close_channel,"SteamAPI_ISteamNetworkingMessages_CloseChannelWithUser");SDK(session_info,"SteamAPI_ISteamNetworkingMessages_GetSessionConnectionInfo");SDK(release,"SteamAPI_SteamNetworkingMessage_t_Release");SDK(user_id,"SteamAPI_ISteamUser_GetSteamID");SDK(auth_ticket,"SteamAPI_ISteamUser_GetAuthSessionTicket");SDK(cancel_ticket,"SteamAPI_ISteamUser_CancelAuthTicket");
 #undef SDK
  size_t count=0;const void **assemblies=il.assemblies(il.domain(),&count);
- for(size_t i=0;i<count;i++){const void *image=il.image(assemblies[i]);if(strcmp(il.image_name(image),"com.rlabrecque.steamworks.net.dll")==0)steam_image=image;}
- return steam_image!=NULL;
+ for(size_t i=0;i<count;i++){const void *image=il.image(assemblies[i]);const char *name=il.image_name(image);if(strcmp(name,"com.rlabrecque.steamworks.net.dll")==0)steam_image=image;else if(strcmp(name,"UnityEngine.CoreModule.dll")==0)core_image=image;}
+ return steam_image!=NULL&&core_image!=NULL;
 }
 static bool resolve_game(void){
  game.lobby_class=klass("MoonSteamLobby");game.member_class=il.klass(game_image,"MoonCleaners","MoonSteamLobby/Member");
  /* class_from_name uses the metadata's nested-name spelling inconsistently;
     enumerate nested types through the public runtime API if necessary. */
  if(!game.member_class){void *(__cdecl *nested)(void *,void **)=NULL;const char *(__cdecl *name)(void *)=NULL;FARPROC p=GetProcAddress(game_module,"il2cpp_class_get_nested_types");memcpy(&nested,&p,sizeof(p));p=GetProcAddress(game_module,"il2cpp_class_get_name");memcpy(&name,&p,sizeof(p));if(!nested||!name)return false;void *it=NULL,*k;while((k=nested(game.lobby_class,&it))!=NULL)if(strcmp(name(k),"Member")==0){game.member_class=k;break;}}
- game.crew_class=klass("MoonCrewSession");game.crew_identity_class=klass("MoonCrew");
+ game.crew_class=klass("MoonCrewSession");game.crew_identity_class=klass("MoonCrew");game.world_class=klass("MoonWorld");
  {void *(__cdecl *nested)(void *,void **)=NULL;const char *(__cdecl *name)(void *)=NULL;FARPROC p=GetProcAddress(game_module,"il2cpp_class_get_nested_types");memcpy(&nested,&p,sizeof(p));p=GetProcAddress(game_module,"il2cpp_class_get_name");memcpy(&name,&p,sizeof(p));if(!nested||!name)return false;void *it=NULL,*k;while((k=nested(game.crew_class,&it))!=NULL)if(strcmp(name(k),"CrewJoin")==0){game.join_class=k;break;}}
- if(!game.lobby_class||!game.member_class||!game.crew_class||!game.join_class||!game.crew_identity_class)return false;
+ if(!game.lobby_class||!game.member_class||!game.crew_class||!game.join_class||!game.crew_identity_class||!game.world_class)return false;
+ game.bound_field=il.field(game.crew_class,"bound");game.sending_field=il.field(game.crew_class,"sending");game.counted_field=il.field(game.crew_class,"counted");game.radio_counted_field=il.field(game.crew_class,"radioCounted");
+ if(!game.bound_field||!game.sending_field||!game.counted_field||!game.radio_counted_field)return false;
  il.class_init(game.lobby_class);game.list_field=il.field(game.lobby_class,"members");if(!game.list_field)return false;il.static_get(game.list_field,&game.member_list);if(!game.member_list)return false;
  void *list_class=il.object_class(game.member_list);game.list_clear=method(list_class,"Clear",0);game.list_add=method(list_class,"Add",1);
 #define FIELD(member,name) do{game.member=il.field(game.member_class,name);if(!game.member)return false;}while(0)
@@ -607,7 +678,11 @@ static bool resolve_game(void){
  void *steam=klass("MoonSteam"),*session=klass("MoonSession");
 #define METHOD(member,k,name,n) do{game.member=method(k,name,n);if(!game.member){report("Missing game method " name);return false;}}while(0)
  METHOD(steam_initialized,steam,"get_Initialized",0);METHOD(set_initialized,steam,"set_Initialized",1);METHOD(set_steam_id,steam,"set_SteamId",1);METHOD(set_persona,steam,"set_PersonaName",1);METHOD(persona,steam,"get_PersonaName",0);METHOD(crew_create,game.crew_class,"Create",0);METHOD(crew_instance,game.crew_class,"get_Instance",0);METHOD(session_start,session,"StartShift",0);METHOD(in_menu,session,"get_InMenu",0);METHOD(newhire_active,klass("MoonNewHire"),"get_Active",0);METHOD(begin_join,game.crew_class,"BeginJoin",1);METHOD(join_ctor,game.join_class,".ctor",3);
- METHOD(crew_world_join,game.crew_identity_class,"Join",2);METHOD(crew_world_leave,game.crew_identity_class,"Leave",0);METHOD(crew_world_joined,game.crew_identity_class,"get_Joined",0);METHOD(crew_world_host_id,game.crew_identity_class,"get_HostId",0);
+ METHOD(crew_world_join,game.crew_identity_class,"Join",2);METHOD(crew_world_leave,game.crew_identity_class,"Leave",0);METHOD(crew_world_joined,game.crew_identity_class,"get_Joined",0);METHOD(crew_world_host_id,game.crew_identity_class,"get_HostId",0);METHOD(player_id,game.crew_identity_class,"PlayerId",1);
+ METHOD(send_world,game.crew_class,"SendWorld",1);METHOD(assign_id_block,game.crew_class,"AssignIdBlock",2);METHOD(world_save_progress,game.world_class,"SaveProgress",0);METHOD(world_has_signed_contract,game.world_class,"HasSignedContract",1);METHOD(world_terrain,game.world_class,"get_Terrain",0);METHOD(world_save_directory,game.world_class,"get_SaveDirectory",0);
+ /* StartCoroutine(string) and StartCoroutine(IEnumerator) share an arity;
+    use Unity's IEnumerator bridge directly to avoid selecting the wrong overload. */
+ game.start_coroutine=method(il.klass(core_image,"UnityEngine","MonoBehaviour"),"StartCoroutineManaged2",1);if(!game.start_coroutine)return false;
 #undef METHOD
  return game.list_clear&&game.list_add;
 }
